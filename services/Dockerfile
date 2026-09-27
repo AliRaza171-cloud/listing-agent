@@ -9,6 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
 WORKDIR /app
+# slow/unstable connections: give up on a stalled download after 60s and retry instead of hanging
+ENV PIP_DEFAULT_TIMEOUT=60 PIP_RETRIES=10
 
 # shared infrastructure library
 COPY libs/common /libs/common

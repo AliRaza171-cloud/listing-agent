@@ -180,7 +180,15 @@ router = APIRouter(dependencies=[Depends(require_internal)])  # the gateway adds
 
 
 @router.get("/credits")
-def my_credits(user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+async def my_credits(user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    # A buyer may never come back from the payment page (closed tab, no redirect): each time the
+    # balance is loaded, ask the provider about this user's recent unconfirmed payments.
+    recent = db.execute(text(
+        "SELECT * FROM payments WHERE user_id = :u AND status = 'pending' AND provider_ref IS NOT NULL "
+        "AND created_at > (now() AT TIME ZONE 'utc') - interval '2 hours' ORDER BY created_at DESC LIMIT 3"),
+        {"u": str(user_id)}).fetchall()
+    for row in recent:
+        await _confirm_pending(db, row)
     balance = db.execute(text("SELECT balance FROM credit_accounts WHERE user_id = :u"), {"u": str(user_id)}).scalar()
     history = db.execute(text("SELECT delta, reason, created_at FROM credit_transactions WHERE user_id = :u "
                               "ORDER BY created_at DESC LIMIT 50"), {"u": str(user_id)})
@@ -293,7 +301,7 @@ async def start_checkout(data: CheckoutIn, user_id: uuid.UUID = Depends(current_
         else:
             co = await provider.create_checkout(
                 payment_id=pid, amount=amount, currency=currency,
-                redirect_url=f"{settings.api_base}/api/billing/payments/safepay/return",
+                redirect_url=f"{settings.api_base}/api/billing/payments/safepay/return?payment={pid}",
                 cancel_url=back + "&cancelled=1")
     except ProviderError as exc:
         _fail_payment(db, pid, str(exc))
@@ -306,21 +314,32 @@ async def start_checkout(data: CheckoutIn, user_id: uuid.UUID = Depends(current_
 @router.get("/payments/{payment_id}")
 async def get_payment(payment_id: uuid.UUID, user_id: uuid.UUID = Depends(current_user_id),
                       db: Session = Depends(get_db)):
-    """Also confirms a Stripe payment by asking Stripe, so it works where webhooks can't reach (local dev)."""
+    """Also confirms a pending payment by asking Stripe/Safepay, so it works where webhooks can't reach (local dev)."""
     q = text("SELECT * FROM payments WHERE id = :id AND user_id = :u")
     row = db.execute(q, {"id": str(payment_id), "u": str(user_id)}).first()
     if not row:
         raise HTTPException(404, "Payment not found.")
-    stripe = _stripe()
-    if row.status == "pending" and row.provider == "stripe" and row.provider_ref and stripe:
+    if await _confirm_pending(db, row):
+        row = db.execute(q, {"id": str(payment_id), "u": str(user_id)}).first()
+    return _payment_out(row)
+
+
+async def _confirm_pending(db: Session, row) -> bool:
+    """Asks the provider about one pending payment and applies the answer. True if anything changed."""
+    if row.status != "pending" or not row.provider_ref:
+        return False
+    if row.provider == "stripe" and (stripe := _stripe()):
         try:
             session = await stripe.get_session(row.provider_ref)
         except ProviderError as exc:
             log.warning("couldn't check Stripe session: %s", exc)
-        else:
-            await _apply_stripe_session(db, session)
-            row = db.execute(q, {"id": str(payment_id), "u": str(user_id)}).first()
-    return _payment_out(row)
+            return False
+        await _apply_stripe_session(db, session)
+        return True
+    if row.provider == "safepay" and (safepay := _safepay()):
+        if await safepay.is_paid(row.provider_ref):
+            return await _credit_payment(db, str(row.id))
+    return False
 
 
 async def _apply_stripe_session(db: Session, session: dict) -> None:
@@ -369,18 +388,34 @@ async def safepay_return(request: Request, db: Session = Depends(get_db)):
     """Safepay sends the buyer's browser here after paying (form POST, or GET on some flows)."""
     fields = {k: v[0] for k, v in parse_qs((await request.body()).decode("utf-8", "replace")).items()}
     fields.update({k: v for k, v in request.query_params.items() if k not in fields})
-    tracker, sig, order_id = fields.get("tracker", ""), fields.get("sig") or fields.get("signature", ""), fields.get("order_id", "")
+    tracker = fields.get("tracker") or fields.get("token") or fields.get("beacon") or ""
+    sig = fields.get("sig") or fields.get("signature") or ""
+    order_id = fields.get("payment") or fields.get("order_id") or fields.get("orderId") or ""
+    log.info("Safepay return: fields=%s", sorted(fields))  # names only, never values
     app_url = settings.APP_URL.rstrip("/")
     safepay = _safepay()
     row = None
     if tracker:
-        row = db.execute(text("SELECT id FROM payments WHERE provider = 'safepay' AND provider_ref = :t"),
+        row = db.execute(text("SELECT id, provider_ref FROM payments WHERE provider = 'safepay' AND provider_ref = :t"),
                          {"t": tracker}).first()
-    if row is None or safepay is None or not safepay.verify_return(tracker, sig):
-        log.warning("Safepay return failed verification (order_id=%s)", order_id)
-        target = f"{app_url}/credits?payment={row.id}&failed=1" if row else f"{app_url}/credits?failed=1"
-        return RedirectResponse(target, status_code=303)
-    await _credit_payment(db, str(row.id))
+    if row is None and order_id:
+        try:
+            row = db.execute(text("SELECT id, provider_ref FROM payments WHERE provider = 'safepay' AND id = :id"),
+                             {"id": str(uuid.UUID(order_id))}).first()
+        except ValueError:
+            row = None
+    if row is None or safepay is None:
+        log.warning("Safepay return for an unknown payment (order_id=%s)", order_id)
+        return RedirectResponse(f"{app_url}/credits?failed=1", status_code=303)
+    # 1) the signed redirect; 2) otherwise ask Safepay directly about OUR stored tracker.
+    confirmed = bool(tracker) and tracker == row.provider_ref and safepay.verify_return(tracker, sig)
+    if not confirmed:
+        confirmed = bool(await safepay.is_paid(row.provider_ref))
+        log.info("Safepay return: signature %s, Fetch Tracker says paid=%s",
+                 "missing" if not sig else "didn't match", confirmed)
+    if confirmed:
+        await _credit_payment(db, str(row.id))
+    # Not confirmed yet: the Credits page keeps asking (GET /payments/<id> checks Safepay again).
     return RedirectResponse(f"{app_url}/credits?payment={row.id}", status_code=303)
 
 

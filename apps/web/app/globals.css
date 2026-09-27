@@ -240,8 +240,8 @@ a.row:hover { background: var(--faint); color: var(--ink); }
 /* ---------- credits ---------- */
 .packs { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
 .pack { border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
-.pack.featured { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
-.pack-name { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.pack-tag { margin-left: 8px; font-size: 11px; letter-spacing: 0.02em; text-transform: none; font-weight: 600; color: var(--accent-dark); background: var(--accent-soft); padding: 2px 8px; border-radius: 999px; }
+.pack-name { display: flex; align-items: center; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .pack-credits { font-family: var(--display); font-weight: 800; font-size: 32px; line-height: 1.1; }
 .pack-credits span { font-family: inherit; font-size: 15px; font-weight: 600; color: var(--ink-2); }
 .pack-price { font-size: 17px; font-weight: 600; }

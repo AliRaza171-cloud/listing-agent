@@ -1,0 +1,33 @@
+# Production overrides. Use together with the main file, from the repo root:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+# (deploy/update.sh does this for you.)
+#
+# Differences from local:
+#  - Caddy is the only thing open to the internet (ports 80/443) and gets a free HTTPS certificate
+#    for API_DOMAIN automatically. The gateway is no longer published on a host port.
+#  - Stores on "localhost" make no sense on a server, so the publisher's localhost alias is off.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports: ["80:80", "443:443"]
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates (keep this volume)
+      - caddy_config:/config
+    depends_on: [gateway]
+
+  gateway:
+    ports: !reset []
+    restart: always
+
+  publisher:
+    environment:
+      STORE_LOCALHOST_ALIAS: ""
+
+volumes:
+  caddy_data:
+  caddy_config:

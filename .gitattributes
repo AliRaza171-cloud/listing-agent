@@ -1,0 +1,4 @@
+# Scripts run on Linux servers: always LF line endings, even when committed from Windows.
+*.sh text eol=lf
+deploy/Caddyfile text eol=lf
+*.yml text eol=lf

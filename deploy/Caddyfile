@@ -1,0 +1,8 @@
+# HTTPS front door for the API. Caddy gets and renews the certificate by itself.
+{$API_DOMAIN} {
+	encode gzip
+	request_body {
+		max_size 25MB   # photos (8 MB each) and voice notes
+	}
+	reverse_proxy gateway:8000
+}

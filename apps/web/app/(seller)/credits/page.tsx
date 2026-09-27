@@ -138,8 +138,8 @@ function CreditsInner() {
             const other = pack.prices[stripeCur];
             const perCredit = pkr ? pkr / pack.credits : null;
             return (
-              <div key={pack.id} className={`pack${i === 1 ? " featured" : ""}`}>
-                <span className="pack-name">{pack.name}</span>
+              <div key={pack.id} className="pack">
+                <span className="pack-name">{pack.name}{i === 1 && shop.packs.length > 2 && <span className="pack-tag">Most popular</span>}</span>
                 <span className="pack-credits">{pack.credits.toLocaleString("en-US")} <span>credits</span></span>
                 <span className="pack-price">
                   {pkr !== undefined ? money(pkr, "PKR") : other !== undefined ? money(other, stripeCur) : "—"}

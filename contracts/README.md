@@ -162,7 +162,7 @@ seller clicks Publish (N stores)
 | `GET\|POST /api/billing/payments/safepay/return` | buyer's browser (public) | `tracker` + `sig` (HMAC-SHA256 of tracker, v1 secret) → `303` to `/credits?payment=<id>` |
 
 A payment is credited **once** (`UPDATE … WHERE status <> 'paid'`), whichever confirmation arrives
-first, then billing emits `credits.purchased`. Safepay amounts are sent in rupees, Stripe in minor units.
+first, then billing emits `credits.purchased`. Both Safepay (Payments 2.0) and Stripe take amounts in minor units (paisa / cents).
 
 ## 6. Custom-store Listing API (what a custom store must implement)
 

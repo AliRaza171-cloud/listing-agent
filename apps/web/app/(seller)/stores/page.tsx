@@ -30,9 +30,9 @@ const FORMS: Record<Platform, {
     ],
   },
   custom: {
-    intro: "For Smart Click or any site with the Listing API. Your own Smart Click on this PC: http://localhost:8000",
+    intro: "For Smart Click or any site with the Listing API. Use the store’s backend (API) address, not its website address. Running Listing Agent on your PC? Your local Smart Click is http://localhost:8000",
     urlLabel: "Store API URL",
-    urlPlaceholder: "http://localhost:8000",
+    urlPlaceholder: "https://your-store-backend.onrender.com",
     fields: [{ key: "api_key", label: "API key", placeholder: "LISTING_API_KEY from the store’s .env", secret: true }],
   },
 };

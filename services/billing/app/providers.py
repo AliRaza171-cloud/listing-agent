@@ -4,11 +4,9 @@ Stripe   — international cards. Checkout Sessions API; webhook signature per
            https://docs.stripe.com/webhooks#verify-manually (HMAC-SHA256 of "t.payload").
 Safepay  — Pakistani cards, JazzCash, EasyPaisa (PKR). Follows Safepay's own SDKs and
            WooCommerce plugin (github.com/getsafepay):
-             * POST {api}/order/v1/init {client, amount, currency, environment} -> data.token (the "tracker")
-               amount is in RUPEES (the plugin sends the order total as a float), not paisa.
-             * the buyer is sent to {checkout}?beacon=<tracker>&order_id=..&redirect_url=..&cancel_url=..
-             * after paying, Safepay sends the browser back to redirect_url with tracker + sig,
-               sig = HMAC-SHA256(tracker, v1 secret)
+             * Payments 2.0 checkout (see class Safepay): tracker created with the SECRET key,
+               amount in PAISA; confirmed by asking Safepay (Fetch Tracker), not by trusting the redirect.
+             * a legacy redirect may carry sig = HMAC-SHA256(tracker, secret key); accepted if present.
              * webhook header X-SFPY-Signature = HMAC-SHA512(JSON of body["data"], webhook secret)
 Nothing here touches the database; main.py decides what a verified result means.
 """
@@ -17,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
@@ -24,6 +23,7 @@ from urllib.parse import urlencode
 import httpx
 
 TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+log = logging.getLogger("lagent.billing.providers")
 
 
 class ProviderError(Exception):
@@ -117,11 +117,35 @@ class Stripe:
 # ------------------------------------------------------------------ Safepay
 
 SAFEPAY_API = {"production": "https://api.getsafepay.com", "sandbox": "https://sandbox.api.getsafepay.com"}
-SAFEPAY_CHECKOUT = {"production": "https://getsafepay.com/checkout/pay",
-                    "sandbox": "https://sandbox.api.getsafepay.com/checkout/pay"}
+# Hosted checkout of Safepay "Payments 2.0" (as built by their current PHP SDK, Checkout::constructURL).
+SAFEPAY_CHECKOUT = {"production": "https://getsafepay.com/embedded",
+                    "sandbox": "https://sandbox.api.getsafepay.com/embedded"}
+
+
+def _safepay_error(r: httpx.Response) -> str:
+    try:
+        body = r.json()
+    except ValueError:
+        return f"HTTP {r.status_code}"
+    if isinstance(body, dict):
+        errors = (body.get("status") or {}).get("errors") if isinstance(body.get("status"), dict) else None
+        if errors:
+            return str(errors[0])
+        if body.get("message"):
+            return str(body["message"])
+    return f"HTTP {r.status_code}"
 
 
 class Safepay:
+    """Payments 2.0 flow, following Safepay's official PHP SDK (github.com/getsafepay/sfpy-php):
+      1. POST /order/payments/v3/        (X-SFPY-MERCHANT-SECRET: secret key)
+         {merchant_api_key: public key, intent, mode: payment, currency, amount in PAISA} -> data.tracker.token
+      2. POST /order/payments/v3/<tracker>/metadata  {data: {order_id}}   (optional, for reconciliation)
+      3. POST /client/passport/v1/token  -> data = time-based token (tbt)
+      4. buyer goes to <checkout>?environment=..&tracker=..&tbt=..&source=custom&redirect_url=..&cancel_url=..
+      5. confirm with GET /reporter/api/v1|v2/payments/<tracker>  (see is_paid)
+    """
+
     def __init__(self, api_key: str, v1_secret: str, webhook_secret: str = "", environment: str = "sandbox",
                  api_url: str = "", checkout_url: str = ""):
         if environment not in SAFEPAY_API:
@@ -130,25 +154,50 @@ class Safepay:
         self.api = (api_url or SAFEPAY_API[environment]).rstrip("/")
         self.checkout = checkout_url or SAFEPAY_CHECKOUT[environment]
 
-    async def create_checkout(self, *, payment_id: str, amount: float, currency: str,
-                              redirect_url: str, cancel_url: str) -> Checkout:
-        body = {"client": self.key, "amount": float(amount), "currency": currency.upper(), "environment": self.env}
+    async def _post(self, client: httpx.AsyncClient, path: str, body: dict | None = None) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                r = await client.post(f"{self.api}/order/v1/init", json=body)
+            return await client.post(f"{self.api}{path}", json=body if body is not None else {},
+                                     headers={"X-SFPY-MERCHANT-SECRET": self.v1_secret})
         except httpx.HTTPError:
             raise ProviderError("Couldn't reach Safepay. Try again in a moment.")
-        try:
-            data = r.json()
-        except ValueError:
-            data = {}
-        token = ((data.get("data") or {}).get("token")) if isinstance(data, dict) else None
-        if r.status_code >= 400 or not token:
-            errors = ((data.get("status") or {}).get("errors") if isinstance(data, dict) else None) or []
-            detail = errors[0] if errors else f"HTTP {r.status_code}"
-            raise ProviderError(f"Safepay: {detail}")
-        query = urlencode({"env": self.env, "beacon": token, "source": "custom", "order_id": payment_id,
-                           "redirect_url": redirect_url, "cancel_url": cancel_url, "webhooks": "true"})
+
+    async def create_checkout(self, *, payment_id: str, amount: float, currency: str,
+                              redirect_url: str, cancel_url: str) -> Checkout:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            r = await self._post(client, "/order/payments/v3/", {
+                "merchant_api_key": self.key, "intent": "CYBERSOURCE", "mode": "payment",
+                "currency": currency.upper(), "amount": int(round(float(amount) * 100)),  # paisa
+            })
+            if r.status_code >= 400:
+                raise ProviderError(f"Safepay: {_safepay_error(r)}")
+            try:
+                token = ((r.json().get("data") or {}).get("tracker") or {}).get("token")
+            except (ValueError, AttributeError):
+                token = None
+            if not token:
+                raise ProviderError("Safepay didn't return a payment session.")
+
+            meta = await self._post(client, f"/order/payments/v3/{token}/metadata",
+                                    {"data": {"order_id": payment_id, "source": "listing-agent"}})
+            if meta.status_code >= 400:  # only for reconciliation in the dashboard; not fatal
+                log.warning("Safepay metadata: %s", _safepay_error(meta))
+
+            p = await self._post(client, "/client/passport/v1/token")
+            if p.status_code >= 400:
+                raise ProviderError(f"Safepay: {_safepay_error(p)}")
+            try:
+                tbt = p.json().get("data")
+            except (ValueError, AttributeError):
+                tbt = None
+            if isinstance(tbt, dict):
+                tbt = tbt.get("token")
+            if not isinstance(tbt, str) or not tbt:
+                raise ProviderError("Safepay didn't return a checkout token.")
+
+        # "hosted" = full-page checkout that redirects back (as in Safepay's own example);
+        # "custom" is for checkout embedded in a page and stops on "Paid successfully".
+        query = urlencode({"environment": self.env, "tracker": token, "source": "hosted", "tbt": tbt,
+                           "redirect_url": redirect_url, "cancel_url": cancel_url})
         return Checkout(ref=token, url=f"{self.checkout}?{query}")
 
     def verify_return(self, tracker: str, sig: str) -> bool:
@@ -156,6 +205,35 @@ class Safepay:
             return False
         expected = hmac.new(self.v1_secret.encode(), tracker.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, sig.strip().lower())
+
+    async def is_paid(self, tracker: str) -> bool | None:
+        """Asks Safepay about a tracker (Fetch Tracker API, as in Safepay's official PHP SDK:
+        GET /reporter/api/v1/payments/<tracker>, header X-SFPY-MERCHANT-SECRET: <secret key>).
+        True = paid, False = not paid (yet), None = couldn't tell."""
+        if not (self.v1_secret and tracker):
+            return None
+        # v1 is in Safepay's docs; v2 is what their current PHP SDK calls. Try both.
+        for version in ("v1", "v2"):
+            try:
+                async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                    r = await client.get(f"{self.api}/reporter/api/{version}/payments/{tracker}",
+                                         headers={"X-SFPY-MERCHANT-SECRET": self.v1_secret})
+            except httpx.HTTPError as exc:
+                log.warning("Safepay fetch tracker %s: %s", version, type(exc).__name__)
+                continue
+            if r.status_code != 200:
+                log.warning("Safepay fetch tracker %s: HTTP %s %s", version, r.status_code, r.text[:300])
+                continue
+            try:
+                body = r.json()
+            except ValueError:
+                continue
+            paid = safepay_tracker_paid(body)
+            data = body.get("data", body) if isinstance(body, dict) else {}
+            log.info("Safepay fetch tracker %s: state=%s is_success=%s -> paid=%s", version,
+                     _find_key(data, "state"), _find_key(data, "is_success"), paid)
+            return paid
+        return None
 
     def verify_webhook(self, raw_body: bytes, signature: str) -> dict | None:
         """Returns body["data"] when the X-SFPY-Signature matches, else None.
@@ -225,3 +303,33 @@ def safepay_webhook_result(data: dict) -> tuple[str | None, bool]:
         tracker = tracker.get("token")
     state = str(data.get("state") or (data.get("notification") or {}).get("state") or "").upper()
     return (tracker if isinstance(tracker, str) else None), state in SAFEPAY_PAID_STATES
+
+
+def _find_key(obj, key: str, depth: int = 0):
+    """First value for `key` in nested dicts (breadth-first, a few levels deep)."""
+    if depth > 4:
+        return None
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                found = _find_key(v, key, depth + 1)
+                if found is not None:
+                    return found
+    elif isinstance(obj, list):
+        for v in obj[:5]:
+            found = _find_key(v, key, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def safepay_tracker_paid(body: dict) -> bool:
+    """A Fetch Tracker response counts as paid when Safepay says it succeeded: is_success true,
+    or (with no is_success field) the tracker has ENDED. An explicit is_success false is never paid."""
+    data = body.get("data", body) if isinstance(body, dict) else {}
+    success = _find_key(data, "is_success")
+    if success is not None:
+        return success is True or str(success).lower() == "true"
+    return str(_find_key(data, "state") or "").upper() in SAFEPAY_PAID_STATES
