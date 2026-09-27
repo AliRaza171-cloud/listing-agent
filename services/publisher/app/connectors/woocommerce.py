@@ -154,9 +154,24 @@ class WooCommerceConnector:
         if p.category_name:
             wanted = p.category_name.strip().lower()
             match = next((c for c in await self.list_categories() if c.name.strip().lower() == wanted), None)
-            if match:
-                body["categories"] = [{"id": int(match.id)}]
+            cat_id = int(match.id) if match else await self._create_category(p.category_name.strip())
+            if cat_id:
+                body["categories"] = [{"id": cat_id}]
         return body
+
+    async def _create_category(self, name: str) -> int | None:
+        """The listing's category doesn't exist in the store yet: create it (best effort —
+        the product is still published, uncategorised, if this fails)."""
+        r = await self._wc("POST", "/products/categories", json={"name": name})
+        if r.status_code in (200, 201):
+            return int(r.json()["id"])
+        try:  # created meanwhile (same name) -> WooCommerce says term_exists and gives its id
+            data = r.json()
+            if data.get("code") == "term_exists":
+                return int((data.get("data") or {}).get("resource_id"))
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return None
 
     def _result(self, r: httpx.Response) -> PublishResult:
         if r.status_code not in (200, 201):

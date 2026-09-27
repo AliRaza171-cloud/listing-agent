@@ -138,8 +138,10 @@ turns those into `dc ps`, `dc logs billing`.
 
 ## Connecting stores from the live site
 
-- **Smart Click:** use its **backend** address (e.g. your Render URL), not the Vercel website, and the same
-  `LISTING_API_KEY` that's set on Smart Click's host.
+- **Smart Click (one click):** enter the Smart Click **website** address (e.g. `frontend-smartclick.vercel.app`),
+  log in there as admin and click Approve. Needs the Smart Click frontend with `/listing-agent/discover` and
+  `/listing-agent/connect`, and its backend with `LISTING_API_CONNECT=true` (the default).
+  *Advanced* still accepts the backend address + `LISTING_API_KEY`.
 - **WooCommerce / Shopify:** as before. Photos now work for WooCommerce without a WordPress app password too,
   because `PUBLIC_BASE_URL` is set.
 - `http://` store addresses are refused online (`ALLOW_HTTP_STORES=false`); stores must use https.

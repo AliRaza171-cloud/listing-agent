@@ -37,6 +37,7 @@ export type Detected = {
   features?: string[];
   suggested_category?: string | null;
   questions_for_seller?: string[];
+  category_is_new?: boolean;
 };
 
 export type Research = {
@@ -253,7 +254,7 @@ export const updateProduct = (id: string, patch: Partial<Pick<Product,
   api<Product>(`catalog/products/${id}`, { method: "PATCH", json: patch });
 export const deleteProduct = (id: string) => api<void>(`catalog/products/${id}`, { method: "DELETE" });
 export const updateListing = (productId: string, listingId: string,
-  patch: Partial<Pick<Listing, "title" | "highlights" | "description" | "tags">>) =>
+  patch: Partial<Pick<Listing, "title" | "highlights" | "description" | "tags" | "category_suggestion">>) =>
   api<Product>(`catalog/products/${productId}/listings/${listingId}`, { method: "PATCH", json: patch });
 
 export const generateListing = (id: string, body: {
@@ -283,8 +284,8 @@ export type ConnectRequest = {
   id: string; platform: Store["platform"]; status: "pending" | "connected" | "failed";
   error: string | null; store_url: string; name: string;
 };
-export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean }>("store/connect/options");
-export const startConnect = (platform: "shopify" | "woocommerce", store: string, name?: string) =>
+export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean; custom?: boolean }>("store/connect/options");
+export const startConnect = (platform: "shopify" | "woocommerce" | "custom", store: string, name?: string) =>
   api<{ request_id: string; authorize_url: string }>(`store/connect/${platform}`, {
     method: "POST", json: { store, name: name || null },
   });

@@ -48,6 +48,20 @@ def _pairs_to_dict(pairs) -> dict[str, str]:
     return out
 
 
+def _match_category(raw, categories) -> tuple[str | None, bool]:
+    """-> (category, is_new). An existing store category is returned with its exact spelling;
+    anything else is a new category the store will create (tidied, max 40 chars)."""
+    name = re.sub(r"\s+", " ", str(raw or "")).strip(" .-")[:40]
+    if not name:
+        return None, False
+    def key(x: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", x.lower().replace("&", "and"))
+    for c in categories or []:
+        if key(c) == key(name):
+            return c, False
+    return name, bool(categories)
+
+
 def _clean_list(items, limit: int, max_len: int = 200) -> list[str]:
     seen, out = set(), []
     for x in items or []:
@@ -73,8 +87,6 @@ class GeminiListingAI:
         if not photos and not (seller_notes or "").strip():
             raise GeminiError("No usable photos or notes to work from.")
         category_prop = {"type": "STRING", "nullable": True}
-        if categories:
-            category_prop = {"type": "STRING", "enum": list(categories)}
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -83,8 +95,7 @@ class GeminiListingAI:
                 "suggested_category": category_prop,
                 "questions_for_seller": LIST_S,
             },
-            "required": ["product_type", "attributes", "features", "questions_for_seller"]
-            + (["suggested_category"] if categories else []),
+            "required": ["product_type", "attributes", "features", "questions_for_seller", "suggested_category"],
         }
         prompt = [
             f"Identify this product from {len(photos)} photo(s)" + (" and the seller's notes." if seller_notes else "."),
@@ -97,24 +108,20 @@ class GeminiListingAI:
             "kind of product but can't be known from the photos or notes (skip anything already answered).",
         ]
         if categories:
-            prompt.append("- suggested_category: the best match from the store's own categories.")
+            prompt.append(
+                "- suggested_category: the store's categories are listed below. Use one ONLY if this product "
+                "clearly belongs in it (a hair dryer does not belong in 'Kitchen & Dining'). If none fits, write a "
+                "NEW short category name a shop would use for this product (Title Case, 1-3 words, e.g. "
+                "'Personal Care', 'Smoking Accessories'), not a product name.\n"
+                "Store categories: " + "; ".join(categories))
+        else:
+            prompt.append("- suggested_category: a short shop category for this product (Title Case, 1-3 words).")
         if seller_notes:
             prompt.append(f"\nSeller's notes:\n{seller_notes.strip()}")
         parts = [Part.text("\n".join(prompt))] + [Part.blob(p, "image/jpeg") for p in photos]
-        try:
-            reply = await self.client.generate(parts, system=SYSTEM, schema=schema, temperature=0.2)
-        except GeminiError as exc:
-            if exc.status != 400 or not categories:
-                raise
-            # Some models reject enum constraints; ask again with a plain string and check it ourselves.
-            log.info("retrying analyze without category enum (%s)", exc)
-            schema["properties"]["suggested_category"] = {"type": "STRING", "nullable": True}
-            parts[0] = Part.text("\n".join(prompt) + "\nStore categories (pick exactly one): " + "; ".join(categories))
-            reply = await self.client.generate(parts, system=SYSTEM, schema=schema, temperature=0.2)
+        reply = await self.client.generate(parts, system=SYSTEM, schema=schema, temperature=0.2)
         d = reply.json or {}
-        suggested = d.get("suggested_category")
-        if categories and suggested not in categories:
-            suggested = None
+        suggested, is_new = _match_category(d.get("suggested_category"), categories)
         return ProductFacts(
             product_type=str(d.get("product_type") or "product").strip(),
             brand=(d.get("brand") or None),
@@ -122,6 +129,7 @@ class GeminiListingAI:
             attributes=_pairs_to_dict(d.get("attributes")),
             features=_clean_list(d.get("features"), 10),
             suggested_category=suggested,
+            category_is_new=is_new,
             questions_for_seller=_clean_list(d.get("questions_for_seller"), 4),
         )
 

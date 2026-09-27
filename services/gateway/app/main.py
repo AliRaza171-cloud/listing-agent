@@ -58,6 +58,7 @@ PUBLIC = {
     # the store service only accepts them for a pending, one-time connect request
     ("store", "POST", "connect/woocommerce/callback"), ("store", "GET", "connect/shopify/callback"),
     ("store", "POST", "shopify/webhooks"),   # verified with Shopify's HMAC header
+    ("store", "POST", "connect/custom/callback"),  # Smart Click etc. send the approved key here
 }
 # X- headers are normally dropped (they could spoof ours); these provider signatures are kept.
 PASS_HEADERS = {"x-sfpy-signature", "x-shopify-hmac-sha256", "x-shopify-topic", "x-shopify-shop-domain"}

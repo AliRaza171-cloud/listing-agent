@@ -23,6 +23,9 @@ class ProductFacts:
     attributes: dict[str, str] = field(default_factory=dict)   # {"color": "silver", "material": "stainless steel?"}
     features: list[str] = field(default_factory=list)
     suggested_category: str | None = None
+    # True when none of the store's categories fits and the AI proposes a new one
+    # (the store creates it on publish).
+    category_is_new: bool = False
     # Details that matter for this product type but aren't knowable from the photo —
     # the UI / voice assistant asks the seller for these.
     questions_for_seller: list[str] = field(default_factory=list)

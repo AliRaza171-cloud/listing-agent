@@ -28,6 +28,10 @@ services:
     environment:
       STORE_LOCALHOST_ALIAS: ""
 
+  store:
+    environment:
+      STORE_LOCALHOST_ALIAS: ""
+
 volumes:
   caddy_data:
   caddy_config:

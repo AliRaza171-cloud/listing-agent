@@ -148,6 +148,7 @@ class ListingPatch(BaseModel):
     tags: list[str] | None = Field(default=None, max_length=30)
     seo_title: str | None = Field(default=None, max_length=200)
     meta_description: str | None = Field(default=None, max_length=400)
+    category_suggestion: str | None = Field(default=None, max_length=60)
 
 
 @router.patch("/products/{product_id}/listings/{listing_id}")
@@ -162,9 +163,16 @@ def update_listing(product_id: uuid.UUID, listing_id: uuid.UUID, data: ListingPa
     for field in ("highlights", "tags"):
         if field in changes and changes[field] is not None:
             changes[field] = [s.strip() for s in changes[field] if s and s.strip()]
+    category = changes.pop("category_suggestion", "__unset__")
     for field, value in changes.items():
         if value is not None:
             setattr(listing, field, value)
+    if category != "__unset__":
+        # The category belongs to the product, not one language: apply it to every current listing.
+        category = (category or "").strip() or None
+        for other in product.listings:
+            if other.is_current:
+                other.category_suggestion = category
     listing.edited_by_seller = True
     db.commit()
     db.refresh(product)

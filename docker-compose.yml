@@ -70,6 +70,9 @@ services:
     build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: store } }
     environment:
       DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/store
+      STORE_LOCALHOST_ALIAS: host.docker.internal   # one-click connect to a store on your own PC
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   publisher:
     <<: *service

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     SHOPIFY_CLIENT_ID: str = ""
     SHOPIFY_CLIENT_SECRET: str = ""
     SHOPIFY_SCOPES: str = "write_products,read_locations,write_inventory,write_publications"
+    # Inside Docker "localhost" is this container; a store running on your own PC is reached
+    # through this name instead (same as the publisher). Empty on a server.
+    STORE_LOCALHOST_ALIAS: str = ""
 
     @property
     def api_base(self) -> str:
@@ -235,7 +238,68 @@ def _shop_domain(raw: str) -> str:
 
 @router.get("/connect/options")
 def connect_options():
-    return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET), "woocommerce": True}
+    return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET), "woocommerce": True,
+            "custom": True}
+
+
+def _reachable(url: str) -> str:
+    """URL as this container can reach it (localhost -> STORE_LOCALHOST_ALIAS in local dev)."""
+    parts = urlsplit(url)
+    if settings.STORE_LOCALHOST_ALIAS and parts.hostname in ("localhost", "127.0.0.1"):
+        parts = parts._replace(netloc=settings.STORE_LOCALHOST_ALIAS + (f":{parts.port}" if parts.port else ""))
+    return parts.geturl()
+
+
+@router.post("/connect/custom")
+async def start_custom(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    """Smart Click and other sites that support Listing Agent: the seller types the WEBSITE address;
+    the site tells us where its API is (/listing-agent/discover), and its admin approves on the site."""
+    site = _woo_url(data.store)   # same normalising/https rules as WooCommerce
+    try:
+        r = await _http.get(_reachable(f"{site}/listing-agent/discover"), timeout=15, follow_redirects=True)
+        info = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        info = None
+    api_url = str((info or {}).get("api_url") or "").rstrip("/")
+    if not info or not re.match(r"^https?://", api_url):
+        raise HTTPException(422, "This website doesn't support one-click connect yet. Use “Advanced” and enter its "
+                                 "API address and key instead.")
+    if api_url.lower().startswith("http://") and not settings.ALLOW_HTTP_STORES:
+        raise HTTPException(422, "The store's API must use https://")
+    name = (data.name or "").strip() or str(info.get("store_name") or "").strip()[:80] or urlsplit(site).hostname
+    req = _new_request(db, user_id, "custom", name, api_url)
+    path = str(info.get("connect_path") or "/listing-agent/connect")
+    query = urlencode({
+        "app": "Listing Agent", "state": str(req.id),
+        "callback_url": f"{settings.api_base}/api/store/connect/custom/callback",
+        "return_url": f"{settings.APP_URL.rstrip('/')}/stores?connect={req.id}",
+    })
+    return {"request_id": str(req.id), "authorize_url": f"{site}{path if path.startswith('/') else '/' + path}?{query}"}
+
+
+@router.post("/connect/custom/callback")
+async def custom_callback(request: Request, db: Session = Depends(get_db)):
+    """Public (the store's backend calls it after its admin approved). Trusted only via the
+    one-time request id; the key is tested against the store before it's saved."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Expected JSON.")
+    req = _open_request(db, str(body.get("state") or ""), "custom")
+    if req is None:
+        raise HTTPException(400, "This connection link has expired — start again from Listing Agent.")
+    key = str(body.get("api_key") or "").strip()
+    if len(key) < 16:
+        _finish(db, req, error="The store didn't send a valid key.")
+        raise HTTPException(400, "Invalid key.")
+    creds = {"api_key": key}
+    try:
+        await _test("custom", req.store_url, creds)
+    except ConnectionFailed as exc:
+        _finish(db, req, error=str(exc))
+        raise HTTPException(400, str(exc))
+    _finish(db, req, store=_save(db, req.user_id, "custom", req.name, req.store_url, creds, replace=True))
+    return {"ok": True}
 
 
 @router.post("/connect/woocommerce")

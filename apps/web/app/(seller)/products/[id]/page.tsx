@@ -16,9 +16,10 @@ import { displayStatus, finalPrice, PLATFORM_NAMES, productTitle, rs } from "@/l
 const TITLE_LIMIT = 70;
 const errText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
-type Draft = { title: string; highlights: string[]; description: string; tags: string[] };
+type Draft = { title: string; highlights: string[]; description: string; tags: string[]; category: string };
 const toDraft = (l: Listing): Draft => ({
   title: l.title, highlights: [...l.highlights], description: l.description, tags: [...l.tags],
+  category: l.category_suggestion ?? "",
 });
 const sameDraft = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -362,6 +363,7 @@ function ListingForm({ product, listing, onSaved, onNotice }: {
         description: draft.description.trim(),
         highlights: draft.highlights.map((h) => h.trim()).filter(Boolean),
         tags: draft.tags,
+        category_suggestion: draft.category.trim() || null,
       }));
       onNotice({ kind: "ok", text: "Listing saved." });
     } catch (e) {
@@ -377,6 +379,16 @@ function ListingForm({ product, listing, onSaved, onNotice }: {
 
   return (
     <div className="editor" dir={rtl ? "rtl" : "ltr"} lang={listing.language}>
+      <div className="field" dir="ltr" lang="en">
+        <div className="label-row"><label htmlFor="l-category">Category in your store</label></div>
+        <input id="l-category" className="input" value={draft.category} placeholder="e.g. Personal Care"
+          onChange={(e) => setDraft({ ...draft, category: e.target.value })} maxLength={60} />
+        <span className="small muted">
+          {product.detected?.category_is_new && draft.category === original.category && draft.category
+            ? "New category — none of your store’s categories fit, so it will be created when you publish."
+            : "If this category doesn’t exist in your store yet, it’s created when you publish."}
+        </span>
+      </div>
       <div className="field">
         <div className="label-row">
           <label htmlFor="l-title" className={rtl ? "urdu" : undefined}>{L.title}</label>

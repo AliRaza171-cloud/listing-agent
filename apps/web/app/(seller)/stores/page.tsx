@@ -38,7 +38,8 @@ const FORMS: Record<Platform, { intro: string; urlLabel: string; urlPlaceholder:
   },
 };
 
-const ONE_CLICK: Record<"shopify" | "woocommerce", { intro: string; label: string; placeholder: string; suffix?: string }> = {
+type OneClick = "shopify" | "woocommerce" | "custom";
+const ONE_CLICK: Record<OneClick, { intro: string; label: string; placeholder: string; suffix?: string }> = {
   woocommerce: {
     intro: "Enter your shop’s address. You’ll log in to your WordPress and click Approve — that’s it.",
     label: "Your shop’s address",
@@ -49,6 +50,11 @@ const ONE_CLICK: Record<"shopify" | "woocommerce", { intro: string; label: strin
     label: "Your Shopify store name",
     placeholder: "yourstore",
     suffix: ".myshopify.com",
+  },
+  custom: {
+    intro: "Smart Click and other sites that support Listing Agent. Enter your website’s address — you’ll log in as the store’s admin and click Approve.",
+    label: "Your website’s address",
+    placeholder: "yourstore.vercel.app",
   },
 };
 
@@ -61,10 +67,11 @@ function Stores() {
   const params = useSearchParams();
   const returning = params.get("connect");
   const expired = params.get("connect_error") === "expired";
+  const denied = params.get("denied") === "1";
 
   const [stores, setStores] = useState<Store[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [oneClick, setOneClick] = useState<{ shopify: boolean; woocommerce: boolean } | null>(null);
+  const [oneClick, setOneClick] = useState<{ shopify: boolean; woocommerce: boolean; custom?: boolean } | null>(null);
   const [result, setResult] = useState<{ kind: "ok" | "error" | "wait"; text: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -77,7 +84,7 @@ function Stores() {
 
   useEffect(() => {
     load();
-    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false }));
+    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false }));
   }, [load]);
 
   // Back from Shopify / WordPress: wait for the connection to be confirmed.
@@ -87,6 +94,10 @@ function Stores() {
       return;
     }
     if (!returning) return;
+    if (denied) {
+      setResult({ kind: "error", text: "You cancelled the connection. Nothing was connected." });
+      return;
+    }
     let stop = false;
     let tries = 0;
     setResult({ kind: "wait", text: "Finishing the connection…" });
@@ -114,7 +125,7 @@ function Stores() {
     }
     poll();
     return () => { stop = true; };
-  }, [returning, expired, load]);
+  }, [returning, expired, denied, load]);
 
   async function disconnect(s: Store) {
     if (!window.confirm(`Disconnect ${s.name}? Its saved keys are deleted. Products already in the store stay there.`)) return;
@@ -163,13 +174,9 @@ function Stores() {
 
       <h2 className="display" style={{ fontWeight: 800, fontSize: 24, marginTop: 8 }}>Connect a store</h2>
       <div className="connect-grid">
-        {(["woocommerce", "shopify"] as const).map((p) => (
-          <OneClickCard key={p} platform={p} available={oneClick ? oneClick[p] : null} onConnected={load} />
+        {(["woocommerce", "shopify", "custom"] as const).map((p) => (
+          <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load} />
         ))}
-        <section className="card">
-          <div className="display">{PLATFORM_NAMES.custom}</div>
-          <ManualForm platform="custom" onConnected={load} />
-        </section>
       </div>
       <div className="note-dark">
         Your store’s access keys are encrypted as soon as they reach us and are never shown again — not even to you.
@@ -180,7 +187,7 @@ function Stores() {
 }
 
 function OneClickCard({ platform, available, onConnected }: {
-  platform: "shopify" | "woocommerce"; available: boolean | null; onConnected: () => void;
+  platform: OneClick; available: boolean | null; onConnected: () => void;
 }) {
   const cfg = ONE_CLICK[platform];
   const [store, setStore] = useState("");
@@ -206,18 +213,18 @@ function OneClickCard({ platform, available, onConnected }: {
     <section className="card">
       <div className="display">{PLATFORM_NAMES[platform]}</div>
       {available !== false && (
-        <form onSubmit={go} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <form onSubmit={go} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <p className="small muted">{cfg.intro}</p>
           <label className="field">{cfg.label}
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input className="input" value={store} placeholder={cfg.placeholder} inputMode="url" autoComplete="off"
+              <input className="input" name={`${platform}-shop`} value={store} placeholder={cfg.placeholder} inputMode="url" autoComplete="off"
                 onChange={(e) => setStore(e.target.value)} style={{ flex: 1 }} />
               {cfg.suffix && <span className="small muted">{cfg.suffix}</span>}
             </span>
           </label>
           {msg && <div className="alert alert-error" role="alert">{msg}</div>}
           <button className="btn btn-primary" disabled={busy || !store.trim() || available === null}>
-            {busy && <span className="spinner" />}Connect with {PLATFORM_NAMES[platform]}
+            {busy && <span className="spinner" />}{platform === "custom" ? "Connect my store" : `Connect with ${PLATFORM_NAMES[platform]}`}
           </button>
         </form>
       )}
@@ -276,17 +283,20 @@ function ManualForm({ platform, onConnected }: { platform: Platform; onConnected
   const complete = url.trim() && cfg.fields.every((f) => f.optional || (creds[f.key] ?? "").trim());
 
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <form onSubmit={submit} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <p className="small muted">{cfg.intro}</p>
       <label className="field">Name (shown in the app)
-        <input className="input" value={name} placeholder="e.g. Home Kitchen Co." onChange={(e) => setName(e.target.value)} />
+        <input className="input" name={`${platform}-store-name`} autoComplete="off" value={name} placeholder="e.g. Home Kitchen Co."
+          onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="field">{cfg.urlLabel}
-        <input className="input" value={url} placeholder={cfg.urlPlaceholder} onChange={(e) => setUrl(e.target.value)} inputMode="url" />
+        <input className="input" name={`${platform}-store-url`} autoComplete="off" value={url} placeholder={cfg.urlPlaceholder}
+          onChange={(e) => setUrl(e.target.value)} inputMode="url" />
       </label>
       {cfg.fields.map((f) => (
         <label key={f.key} className="field">{f.label}
-          <input className="input" type={f.secret ? "password" : "text"} autoComplete="off" placeholder={f.placeholder}
+          <input className="input" name={`${platform}-${f.key}`} type={f.secret ? "password" : "text"}
+            autoComplete={f.secret ? "new-password" : "off"} data-lpignore="true" data-1p-ignore placeholder={f.placeholder}
             value={creds[f.key] ?? ""} onChange={(e) => setCreds({ ...creds, [f.key]: e.target.value })} />
         </label>
       ))}

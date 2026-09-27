@@ -156,9 +156,29 @@ class ShopifyConnector:
         if p.category_name:
             wanted = p.category_name.strip().lower()
             match = next((c for c in await self.list_categories() if c.name.strip().lower() == wanted), None)
-            if match:
-                product["collections"] = [match.id]
+            collection_id = match.id if match else await self._create_collection(p.category_name.strip())
+            if collection_id:
+                product["collections"] = [collection_id]
         return product
+
+    async def _create_collection(self, title: str) -> str | None:
+        """The listing's category doesn't exist as a collection yet: create a manual collection
+        (best effort — the product is still published without it if this fails)."""
+        try:
+            data = await self._gql("""mutation C($input: CollectionInput!) {
+                collectionCreate(input: $input) { collection { id } userErrors { message } } }""",
+                                   {"input": {"title": title}})
+        except ConnectorError as exc:
+            log.info("couldn't create collection %r (%s)", title, exc)
+            return None
+        res = data.get("collectionCreate") or {}
+        if res.get("userErrors"):
+            log.info("couldn't create collection %r: %s", title, res["userErrors"][0].get("message"))
+            return None
+        collection_id = (res.get("collection") or {}).get("id")
+        if collection_id:
+            await self._publish_online_store(collection_id)   # so the new collection shows in the shop
+        return collection_id
 
     async def _publish_online_store(self, product_id: str) -> None:
         """ACTIVE isn't enough to be visible: the product must be on the Online Store channel.
