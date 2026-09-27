@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# One-time setup of a fresh Ubuntu 24.04 server for Listing Agent. Run as root:
-#   bash setup-server.sh
+# One-time setup of a fresh Ubuntu 24.04 server (x86 or ARM, e.g. Hetzner or Oracle Cloud Free).
+# Run as root:   sudo -i   then   bash deploy/setup-server.sh
 set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "Run as root: sudo -i, then run this again."; exit 1; }
 
 echo "==> Updating the system"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-apt-get install -y ca-certificates curl git ufw openssl
+apt-get install -y ca-certificates curl git openssl python3
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "==> Installing Docker"
@@ -20,11 +21,24 @@ if ! swapon --show | grep -q .; then
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-echo "==> Firewall: only SSH, HTTP and HTTPS"
-ufw allow OpenSSH
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
+if [ -f /etc/iptables/rules.v4 ] && command -v netfilter-persistent >/dev/null 2>&1; then
+  # Oracle Cloud's Ubuntu images ship their own iptables rules that reject everything except SSH.
+  # Keep them (don't mix in ufw) and just open HTTP/HTTPS in front of the reject rule.
+  echo "==> Firewall (Oracle-style iptables): opening HTTP and HTTPS"
+  for port in 443 80; do
+    iptables -C INPUT -p tcp -m state --state NEW --dport "$port" -j ACCEPT 2>/dev/null \
+      || iptables -I INPUT 1 -p tcp -m state --state NEW --dport "$port" -j ACCEPT
+  done
+  netfilter-persistent save
+  echo "    Also open TCP 80 and 443 in the Oracle console: VCN -> Security List -> Ingress Rules."
+else
+  echo "==> Firewall: only SSH, HTTP and HTTPS"
+  apt-get install -y ufw
+  ufw allow OpenSSH
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+  ufw --force enable
+fi
 
 echo "==> Automatic security updates"
 apt-get install -y unattended-upgrades

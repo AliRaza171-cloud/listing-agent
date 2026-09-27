@@ -5,7 +5,7 @@ What goes where:
 | Part | Where | Cost |
 |---|---|---|
 | Website (`apps/web`) | Vercel | free |
-| Backend (9 services + Postgres + Redis) | one small VPS, e.g. Hetzner CX22 (2 CPU / 4 GB) | ≈ €4–5 / month |
+| Backend (9 services + Postgres + Redis) | one small server: Oracle Cloud Always Free (ARM) or Hetzner CX22 | free / ≈ €4–5 a month |
 | API address with HTTPS | DuckDNS (free subdomain) + Caddy (free certificate, automatic) | free |
 
 You'll end up with:
@@ -41,18 +41,32 @@ git push
 
 ## 3. Create the server
 
-1. Hetzner Cloud → new project → **Add Server**: Ubuntu **24.04**, type **CX22** (or any 2 CPU / 4 GB), any location.
-   Add your SSH key if you have one; otherwise use the root password Hetzner emails you.
-2. Copy the server's **IPv4 address**.
-3. Back on DuckDNS, paste that IP next to your subdomain → **update ip**.
+### Option A — Oracle Cloud Always Free ($0)
+
+1. Sign up at **oracle.com/cloud/free** (a card is needed for verification only; Always Free resources aren't charged).
+   Pick a **home region** close to you — it can't be changed later.
+2. **Compute → Instances → Create instance**
+   - **Image:** Canonical **Ubuntu 24.04** · **Shape:** Ampere **VM.Standard.A1.Flex**, **2 OCPU / 12 GB** (free limit is 4 / 24)
+   - **Networking:** keep "Assign a public IPv4 address" on
+   - **SSH keys:** *Generate a key pair for me* → **Save private key** (e.g. to `C:\Users\<you>\.ssh\oracle.key`)
+   - Create. If it says **"Out of capacity"**, try another availability domain, or again a bit later.
+3. **Open the web ports in Oracle's firewall:** on the instance page click the **subnet** →
+   **Security Lists → Default Security List → Add Ingress Rules**, twice:
+   Source CIDR `0.0.0.0/0`, IP protocol TCP, destination port `80` — and again for `443`.
+4. Copy the instance's **Public IP** and put it in **DuckDNS → update ip**.
+5. Log in from PowerShell (user is `ubuntu`, and you pass the key file):
+   ```powershell
+   ssh -i $env:USERPROFILE\.ssh\oracle.key ubuntu@YOUR_SERVER_IP
+   ```
+   Then become root for the setup: `sudo -i`
+
+### Option B — Hetzner CX22 (≈ €4–5/month)
+
+Ubuntu 24.04, 2 vCPU / 4 GB, public IPv4 on. Put its IP in DuckDNS, then `ssh root@YOUR_SERVER_IP`.
 
 ## 4. Install and start Listing Agent on the server
 
-From PowerShell on your PC:
-```powershell
-ssh root@YOUR_SERVER_IP
-```
-Then on the server (copy line by line):
+On the server, as root (copy line by line):
 ```bash
 git clone https://github.com/AliRaza171-cloud/listing-agent.git
 cd listing-agent
