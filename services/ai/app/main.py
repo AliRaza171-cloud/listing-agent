@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
     AI_PROVIDER: str = "stub"
     AI_API_KEY: str = ""
-    AI_MODEL: str = ""                 # empty = provider default (gemini: gemini-3.8-flash)
+    AI_MODEL: str = ""                 # empty = provider default (gemini-3.8-flash / gpt-6-luna)
     AI_FALLBACK_MODEL: str = "gemini-3.5-flash-lite"   # used automatically when AI_MODEL is overloaded
+    AI_REASONING_EFFORT: str = "low"   # OpenAI reasoning models: none | low | medium | high
     AI_WEB_SEARCH: bool = True         # Google Search grounding for research (paid Gemini keys); falls back if unavailable
     AI_TIMEOUT_SECONDS: int = 180
     CATALOG_URL: str = "http://catalog:8000"   # where product photos are fetched from

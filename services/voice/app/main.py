@@ -67,6 +67,25 @@ class GeminiSTT:
         return {"text": str(d.get("text") or "").strip(), "language": "ur" if lang in ("ur", "mixed") else "en"}
 
 
+class OpenAISTT:
+    """OpenAI's transcription model writes down the voice note; Urdu comes back in Roman letters."""
+
+    PROMPT = ("Seller in Pakistan giving product details in Urdu and English, written in Roman Urdu: "
+              "is ka price 2500 rakho, 10 percent discount do, stock 20 hai, free shipping.")
+
+    def __init__(self, api_key: str, model: str):
+        from lagent_common.openai_client import OpenAIClient
+
+        self.model = model
+        self.client = OpenAIClient(api_key, "unused", timeout=60)
+
+    async def transcribe(self, audio: bytes, content_type: str) -> dict:
+        text = await self.client.transcribe(audio, content_type, model=self.model, prompt=self.PROMPT)
+        urdu_script = any("\u0600" <= ch <= "\u06ff" for ch in text)
+        roman_urdu = any(w in text.lower().split() for w in ("hai", "ka", "ki", "ko", "rakho", "karo", "do", "aur"))
+        return {"text": text, "language": "ur" if urdu_script or roman_urdu else "en"}
+
+
 def get_stt(settings) -> SpeechToText:
     provider = settings.STT_PROVIDER.lower()
     if provider == "stub":
@@ -74,7 +93,11 @@ def get_stt(settings) -> SpeechToText:
     if provider == "gemini":
         return GeminiSTT(settings.STT_API_KEY, settings.STT_MODEL or "gemini-3.8-flash",
                          settings.STT_FALLBACK_MODEL or None)
-    raise RuntimeError(f"Speech-to-text provider '{settings.STT_PROVIDER}' is not implemented (use 'stub' or 'gemini').")
+    if provider == "openai":
+        model = settings.STT_MODEL if settings.STT_MODEL and not settings.STT_MODEL.startswith("gemini") \
+            else "gpt-4o-mini-transcribe"
+        return OpenAISTT(settings.STT_API_KEY, model)
+    raise RuntimeError(f"Speech-to-text provider '{settings.STT_PROVIDER}' is not implemented (use 'stub', 'gemini' or 'openai').")
 
 
 stt = get_stt(settings)
