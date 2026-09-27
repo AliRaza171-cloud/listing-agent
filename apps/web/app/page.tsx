@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CameraIcon, LogoMark, MicIcon } from "@/components/Icons";
+import { CONTACT_EMAIL } from "@/components/LegalPage";
 
 export default function Landing() {
   return (
@@ -115,9 +116,9 @@ export default function Landing() {
       <footer className="l-footer">
         <span>© Listing Agent</span>
         <span style={{ display: "flex", gap: 24 }}>
-          <a href="#" style={{ color: "var(--muted)" }}>Privacy</a>
-          <a href="#" style={{ color: "var(--muted)" }}>Terms</a>
-          <a href="#" style={{ color: "var(--muted)" }}>Contact</a>
+          <Link href="/privacy" style={{ color: "var(--muted)" }}>Privacy</Link>
+          <Link href="/terms" style={{ color: "var(--muted)" }}>Terms</Link>
+          <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: "var(--muted)" }}>Contact</a>
         </span>
       </footer>
     </div>

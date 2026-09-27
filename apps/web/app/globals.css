@@ -338,6 +338,14 @@ legend { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 0; mar
 .l-cta { margin: 40px 96px 0; background: var(--accent-soft); border-radius: 24px; padding: 48px 56px; display: flex; align-items: center; justify-content: space-between; gap: 40px; }
 .l-footer { margin-top: 80px; padding: 36px 96px; display: flex; justify-content: space-between; gap: 20px; font-size: 14px; color: var(--muted); border-top: 1px solid var(--line); }
 
+/* ---------- legal pages ---------- */
+.legal-wrap { min-height: 100vh; background: var(--bg); display: flex; flex-direction: column; }
+.legal { max-width: 760px; width: 100%; margin: 0 auto; padding: 24px 24px 40px; display: flex; flex-direction: column; gap: 14px; line-height: 1.65; color: var(--ink-2); flex: 1; }
+.legal h1 { font-family: var(--display); font-weight: 800; font-size: 40px; letter-spacing: -0.02em; color: var(--ink); line-height: 1.1; }
+.legal h2 { font-size: 20px; font-weight: 700; color: var(--ink); margin-top: 14px; }
+.legal ul { padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
+.legal b { color: var(--ink); }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1280px) {
   .ws { grid-template-columns: 260px minmax(0, 1fr); }
@@ -366,7 +374,7 @@ legend { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 0; mar
   .ws-title { align-items: flex-start; }
   .ws-title h1 { font-size: 22px; white-space: normal; overflow: visible; }
   .stats { grid-template-columns: 1fr 1fr; }
-  .two-col, .ws, .connect-grid, .grid-2 { grid-template-columns: 1fr; }
+  .two-col, .ws, .connect-grid, .grid-2 { grid-template-columns: minmax(0, 1fr); }
   .ws > .col:last-child { display: flex; }
   .search { width: 100%; }
   .row { grid-template-columns: 1fr auto; }

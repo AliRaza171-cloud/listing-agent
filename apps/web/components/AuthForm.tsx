@@ -88,6 +88,12 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
             {busy && <span className="spinner" />}
             {isSignup ? "Create account" : "Sign in"}
           </button>
+          {isSignup && (
+            <p className="small muted" style={{ textAlign: "center" }}>
+              By creating an account you agree to the <Link href="/terms">Terms</Link> and{" "}
+              <Link href="/privacy">Privacy policy</Link>.
+            </p>
+          )}
 
           <p className="muted" style={{ textAlign: "center" }}>
             {isSignup ? <>Already have an account? <Link href="/login">Sign in</Link></>

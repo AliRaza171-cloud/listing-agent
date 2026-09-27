@@ -79,8 +79,8 @@ class ShopifyConnector:
     # ---------------------------------------------------------------- interface
 
     async def test_connection(self) -> None:
-        if not self.token.startswith("shpat_") and not self.token.startswith("shpca_"):
-            raise ConnectorError("Shopify Admin API access tokens start with shpat_.")
+        if not self.token.startswith("shp"):
+            raise ConnectorError("That isn't a Shopify access token (they start with shp…).")
         data = await self._gql("{ shop { name } }")
         if not (data.get("shop") or {}).get("name"):
             raise ConnectorError("Shopify didn't return the shop details.")

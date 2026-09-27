@@ -54,9 +54,13 @@ PUBLIC = {
     # payment providers call these; billing checks their signatures
     ("billing", "POST", "webhooks/stripe"), ("billing", "POST", "webhooks/safepay"),
     ("billing", "GET", "payments/safepay/return"), ("billing", "POST", "payments/safepay/return"),
+    # one-click store connections: WooCommerce posts keys here, Shopify sends the seller back here;
+    # the store service only accepts them for a pending, one-time connect request
+    ("store", "POST", "connect/woocommerce/callback"), ("store", "GET", "connect/shopify/callback"),
+    ("store", "POST", "shopify/webhooks"),   # verified with Shopify's HMAC header
 }
 # X- headers are normally dropped (they could spoof ours); these provider signatures are kept.
-PASS_HEADERS = {"x-sfpy-signature"}
+PASS_HEADERS = {"x-sfpy-signature", "x-shopify-hmac-sha256", "x-shopify-topic", "x-shopify-shop-domain"}
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade", "host", "content-length"}
 
 _client = httpx.AsyncClient(timeout=30)

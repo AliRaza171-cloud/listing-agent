@@ -278,6 +278,18 @@ export const connectStore = (body: {
 }) => api<Store>("store/stores", { method: "POST", json: body });
 export const disconnectStore = (id: string) => api<void>(`store/stores/${id}`, { method: "DELETE" });
 
+// One-click connections: the seller approves Listing Agent inside their own store admin.
+export type ConnectRequest = {
+  id: string; platform: Store["platform"]; status: "pending" | "connected" | "failed";
+  error: string | null; store_url: string; name: string;
+};
+export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean }>("store/connect/options");
+export const startConnect = (platform: "shopify" | "woocommerce", store: string, name?: string) =>
+  api<{ request_id: string; authorize_url: string }>(`store/connect/${platform}`, {
+    method: "POST", json: { store, name: name || null },
+  });
+export const getConnectRequest = (id: string) => api<ConnectRequest>(`store/connect/requests/${id}`);
+
 export async function transcribe(audio: Blob): Promise<{ text: string; language: string | null }> {
   // The voice service checks the plain type ("audio/webm"), so drop codec parameters.
   const type = (audio.type || "audio/webm").split(";")[0];

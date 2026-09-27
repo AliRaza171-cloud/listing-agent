@@ -164,6 +164,24 @@ seller clicks Publish (N stores)
 A payment is credited **once** (`UPDATE … WHERE status <> 'paid'`), whichever confirmation arrives
 first, then billing emits `credits.purchased`. Both Safepay (Payments 2.0) and Stripe take amounts in minor units (paisa / cents).
 
+## 5a. One-click store connections (store service)
+
+| Endpoint | Who | What |
+|---|---|---|
+| `GET /api/store/connect/options` | seller | `{shopify: bool, woocommerce: bool}` |
+| `POST /api/store/connect/woocommerce` `{store, name?}` | seller | `{request_id, authorize_url}` → WooCommerce's `/wc-auth/v1/authorize` |
+| `POST /api/store/connect/woocommerce/callback` | WooCommerce (public) | JSON `{consumer_key, consumer_secret, user_id=<request_id>}` |
+| `POST /api/store/connect/shopify` `{store, name?}` | seller | `{request_id, authorize_url}` → Shopify OAuth |
+| `GET /api/store/connect/shopify/callback` | seller's browser (public) | verifies Shopify `hmac` + one-time `state`, exchanges `code`, `303` to `/stores?connect=<id>` |
+| `GET /api/store/connect/requests/{id}` | seller | `{status: pending\|connected\|failed, error, name, store_url}` |
+
+`POST /api/store/shopify/webhooks` (public, Shopify) handles customers/data_request and customers/redact (no
+customer data is stored), shop/redact (deletes that shop's connection) and app/uninstalled (disconnects, drops the
+token); each is verified with `X-Shopify-Hmac-Sha256` = base64 HMAC-SHA256(raw body, client secret).
+
+A request is single-use and expires after 60 minutes. Keys are tested (publisher) and stored encrypted
+exactly like manually entered ones; connecting the same store again refreshes its keys.
+
 ## 6. Custom-store Listing API (what a custom store must implement)
 
 The `custom` connector (publisher) talks to any store exposing this, with header `X-Api-Key: <key>`:

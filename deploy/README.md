@@ -97,6 +97,24 @@ Then open your Vercel site, sign up, and you're live.
   anyway; the webhook is a backup.)
 - Apply: `cd ~/listing-agent && bash deploy/update.sh`
 
+## 5b. One-click store connections
+
+- **WooCommerce:** nothing to do — sellers enter their shop address, approve in WordPress, done.
+  (Their WordPress needs "pretty" permalinks, i.e. anything except *Plain*.)
+- **Shopify (one time, by you):** in the **Shopify Dev Dashboard** (dev.shopify.com, free) create an app
+  "Listing Agent":
+  - **Redirect URL:** `https://listingagent.duckdns.org/api/store/connect/shopify/callback`
+  - **Scopes:** `write_products, read_locations, write_inventory, write_publications`
+  - Copy its **Client ID** and **Client secret** into `.env` as `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`,
+    then `bash deploy/update.sh`.
+  - **Webhooks (required for Shopify's review):** in the app's settings, set the **compliance webhooks**
+    (customers/data_request, customers/redact, shop/redact) and an **app/uninstalled** subscription, all to
+    `https://listingagent.duckdns.org/api/store/shopify/webhooks`. Listing Agent checks Shopify's signature on each.
+  - **Privacy policy URL:** `https://<your-vercel-site>/privacy` (set `NEXT_PUBLIC_CONTACT_EMAIL` on Vercel first).
+  - To let *any* Shopify store install it, the app must use **public distribution** (Shopify reviews public
+    apps). Until then, Shopify lets you install it on stores you pick (custom distribution), and sellers can
+    still use "Advanced: connect with API keys".
+
 ## 6. Backups (once)
 
 ```bash

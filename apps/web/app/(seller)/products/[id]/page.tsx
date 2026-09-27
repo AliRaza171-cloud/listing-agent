@@ -315,7 +315,7 @@ function ListingEditor({ product, stores, onSaved, onNotice, onRegenerated }: {
             </button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           {platformsForLang.length > 1 && (
             <label className="small" style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>Format
               <select className="select" style={{ height: 36, width: "auto" }} value={listing.platform ?? "generic"}
