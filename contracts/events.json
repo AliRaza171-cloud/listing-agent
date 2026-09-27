@@ -1,0 +1,12 @@
+{
+  "$comment": "Required data fields per event type (see README.md §3.3). The shared library checks these on publish. Add optional fields freely; changing required ones needs a version bump.",
+  "user.registered":   {"version": 1, "required": ["user_id", "email"]},
+  "listing.requested": {"version": 1, "required": ["job_id", "product_id", "user_id", "reservation_id", "image_urls", "languages", "platforms", "research"]},
+  "listing.generated": {"version": 1, "required": ["job_id", "product_id", "user_id", "reservation_id", "listings"]},
+  "listing.failed":    {"version": 1, "required": ["job_id", "product_id", "user_id", "reservation_id", "reason"]},
+  "publish.requested": {"version": 1, "required": ["publish_job_id", "product_id", "user_id", "store_connection_id", "mode", "product"]},
+  "publish.succeeded": {"version": 1, "required": ["publish_job_id", "product_id", "user_id", "store_connection_id", "external_id"]},
+  "publish.failed":    {"version": 1, "required": ["publish_job_id", "product_id", "user_id", "store_connection_id", "reason", "retryable"]},
+  "credits.purchased": {"version": 1, "required": ["user_id", "amount", "balance"]},
+  "batch.completed":   {"version": 1, "required": ["batch_id", "user_id", "succeeded", "failed"]}
+}

@@ -1,0 +1,100 @@
+# Local development: starts Postgres, Redis and all 9 services.
+#   cp .env.example .env   (fill in the secrets)
+#   docker compose up --build
+# Only the gateway is exposed: http://localhost:${GATEWAY_PORT}/api/<service>/... (default 8000)
+# The web app (apps/web) runs separately: cd apps/web && npm run dev  -> http://localhost:3000
+
+x-service: &service
+  build:
+    context: .
+    dockerfile: services/Dockerfile
+  env_file: .env
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lagent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lagent"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # keep the event streams across restarts
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  gateway:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: gateway } }
+    ports: ["${GATEWAY_PORT:-8000}:8000"]   # change GATEWAY_PORT in .env if 8000 is busy
+
+  auth:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: auth } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/auth
+
+  catalog:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: catalog } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/catalog
+    volumes:
+      - media:/data/media   # uploaded product photos
+
+  ai:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: ai } }
+
+  voice:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: voice } }
+
+  store:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: store } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/store
+
+  publisher:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: publisher } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/publisher
+      # "localhost" inside a container is the container itself; a store running on your PC
+      # (e.g. Smart Click on port 8000) is reached through host.docker.internal instead.
+      STORE_LOCALHOST_ALIAS: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  billing:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: billing } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/billing
+
+  notification:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: notification } }
+    environment:
+      DATABASE_URL: postgresql://lagent:${POSTGRES_PASSWORD:-lagent}@postgres:5432/notification
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
