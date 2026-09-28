@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -279,26 +279,47 @@ async def start_custom(data: StartIn, user_id: uuid.UUID = Depends(current_user_
 
 @router.post("/connect/custom/callback")
 async def custom_callback(request: Request, db: Session = Depends(get_db)):
-    """Public (the store's backend calls it after its admin approved). Trusted only via the
-    one-time request id; the key is tested against the store before it's saved."""
-    try:
-        body = await request.json()
-    except ValueError:
-        raise HTTPException(400, "Expected JSON.")
+    """Public. Trusted only via the one-time request id; the key is tested against the store
+    before it's saved. Two ways in:
+    - JSON from the store's backend (server to server) -> JSON answer;
+    - a form the store admin's BROWSER submits after Approve -> redirect back to /stores. This is
+      what makes one-click work while Listing Agent runs on a PC (localhost), which a hosted store
+      backend can't reach but the admin's own browser can."""
+    ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    from_browser = ctype == "application/x-www-form-urlencoded"
+    if from_browser:
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        body = {k: v[0] for k, v in form.items() if v}
+    else:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Expected JSON.")
+    stores_page = f"{settings.APP_URL.rstrip('/')}/stores"
+
     req = _open_request(db, str(body.get("state") or ""), "custom")
     if req is None:
+        if from_browser:
+            return RedirectResponse(f"{stores_page}?connect_error=expired", status_code=303)
         raise HTTPException(400, "This connection link has expired — start again from Listing Agent.")
+    back = f"{stores_page}?connect={req.id}"   # the Stores page shows the request's result
     key = str(body.get("api_key") or "").strip()
     if len(key) < 16:
         _finish(db, req, error="The store didn't send a valid key.")
+        if from_browser:
+            return RedirectResponse(back, status_code=303)
         raise HTTPException(400, "Invalid key.")
     creds = {"api_key": key}
     try:
         await _test("custom", req.store_url, creds)
     except ConnectionFailed as exc:
         _finish(db, req, error=str(exc))
+        if from_browser:
+            return RedirectResponse(back, status_code=303)
         raise HTTPException(400, str(exc))
     _finish(db, req, store=_save(db, req.user_id, "custom", req.name, req.store_url, creds, replace=True))
+    if from_browser:
+        return RedirectResponse(f"{back}&success=1", status_code=303)
     return {"ok": True}
 
 
