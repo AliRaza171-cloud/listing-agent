@@ -79,8 +79,15 @@ async def on_listing_requested(event: dict) -> None:
 bus.subscribe("listing.requested", on_listing_requested)
 
 
+class StoreRef(BaseModel):
+    id: str = Field(max_length=64)
+    name: str = Field(max_length=120)
+    platform: str = Field(max_length=20)
+
+
 class CommandIn(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
+    stores: list[StoreRef] = Field(default_factory=list, max_length=50)   # the seller's connected stores
 
 
 router = APIRouter(dependencies=[Depends(require_internal)])
@@ -91,12 +98,12 @@ async def parse_command(data: CommandIn, _user=Depends(current_user_id)):
     """Voice/typed command -> structured fields. The UI shows confirmation_text and
     saves nothing until the seller confirms."""
     try:
-        return asdict(await ai.parse_command(data.text))
+        return asdict(await ai.parse_command(data.text, [st.model_dump() for st in data.stores]))
     except GeminiError as exc:
         # The AI is unavailable (rate limit, no key...): fall back to the simple offline parser,
         # which handles "price 2500, 10% off, stock 20" style commands.
         log.warning("command parsing fell back to rules: %s", exc)
-        return asdict(await StubListingAI().parse_command(data.text))
+        return asdict(await StubListingAI().parse_command(data.text, [st.model_dump() for st in data.stores]))
 
 
 app = create_service("ai", routers=[router], bus=bus)

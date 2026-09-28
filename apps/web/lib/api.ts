@@ -87,7 +87,10 @@ export type CommandResult = {
   stock: number | null;
   sku: string | null;
   free_shipping: boolean | null;
-  publish_to: string[];
+  publish: boolean;
+  publish_to: string[];                 // store connection ids
+  publish_mode: "live" | "draft" | null;
+  publish_language: "en" | "ur" | null;
   edit_instruction: string | null;
   confirmation_text: string;
 };
@@ -300,5 +303,7 @@ export async function transcribe(audio: Blob): Promise<{ text: string; language:
   return api("voice/transcribe", { method: "POST", body: form });
 }
 
-export const parseCommand = (text: string) =>
-  api<CommandResult>("ai/commands/parse", { method: "POST", json: { text } });
+export const parseCommand = (text: string, stores: Pick<Store, "id" | "name" | "platform">[] = []) =>
+  api<CommandResult>("ai/commands/parse", {
+    method: "POST", json: { text, stores: stores.map(({ id, name, platform }) => ({ id, name, platform })) },
+  });

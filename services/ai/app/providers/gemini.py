@@ -14,7 +14,8 @@ import re
 from lagent_common.correlation import outgoing_headers
 from lagent_common.gemini import GeminiClient, GeminiError, Part
 
-from app.providers.base import CommandResult, ListingDraft, ProductFacts, Research, ResearchSource
+from app.providers.base import (CommandResult, ListingDraft, ProductFacts, Research, ResearchSource, confirmation,
+                                match_stores)
 from app.providers.images import load_photos
 
 log = logging.getLogger("lagent.ai.gemini")
@@ -242,7 +243,8 @@ class GeminiListingAI:
 
     # ---------------------------------------------------------------- 4. voice / typed commands
 
-    async def parse_command(self, text: str) -> CommandResult:
+    async def parse_command(self, text: str, stores: list[dict] | None = None) -> CommandResult:
+        stores = stores or []
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -253,16 +255,28 @@ class GeminiListingAI:
                 "sku": S_NULL,
                 "free_shipping": {"type": "BOOLEAN", "nullable": True},
                 "edit_instruction": S_NULL,
+                "publish": B,
+                "publish_to": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "publish_mode": {"type": "STRING", "enum": ["live", "draft"], "nullable": True},
+                "publish_language": {"type": "STRING", "enum": ["en", "ur"], "nullable": True},
             },
-            "required": ["remove_discount"],
+            "required": ["remove_discount", "publish", "publish_to"],
         }
+        store_list = "; ".join(f"{st['name']} ({st['platform']})" for st in stores) or "none connected"
         prompt = (
             "A seller gave this instruction about ONE product, in English, Urdu or Roman Urdu "
             "(e.g. 'is ka price 2500 rakho', 'das percent discount', 'stock bees', 'free delivery'). "
             "Extract only what they actually said; everything else null. Numbers may be words in any "
             "of these languages (bees=20, das=10, pachees sau=2500, dhai hazar=2500). "
             "price is in rupees. remove_discount=true only if they ask to remove the discount. "
-            "edit_instruction: a request to change the listing text (e.g. 'title chota karo'), in English.\n\n"
+            "edit_instruction: a request to change the listing text (e.g. 'title chota karo'), in English.\n"
+            "publish=true only if they ask to publish/upload/send/put the product on their store(s) "
+            "(e.g. 'Shopify pe publish karo', 'sab stores pe daal do', 'upload to woo and smart click'). "
+            "publish_to: the stores they named, copied from this list by name, or the platform word they used "
+            "(shopify / woocommerce / custom), or [\"all\"] for all/sab/everywhere/dono; [] if they didn't name any. "
+            "publish_mode: 'live' if they say live/visible/active/show it, 'draft' if they say draft/hidden; else null. "
+            "publish_language: 'ur' if they want the Urdu listing, 'en' for English; else null.\n"
+            f"The seller's stores: {store_list}\n\n"
             f"Instruction: {text}"
         )
         reply = await self.client.generate([Part.text(prompt)], schema=schema, temperature=0)
@@ -282,7 +296,14 @@ class GeminiListingAI:
             sku=(str(d["sku"]).strip() or None) if d.get("sku") else None,
             free_shipping=d.get("free_shipping") if isinstance(d.get("free_shipping"), bool) else None,
             edit_instruction=(str(d["edit_instruction"]).strip() or None) if d.get("edit_instruction") else None,
+            publish=bool(d.get("publish")) and bool(stores),
+            publish_mode=d.get("publish_mode") if d.get("publish_mode") in ("live", "draft") else None,
+            publish_language=d.get("publish_language") if d.get("publish_language") in ("en", "ur") else None,
         )
+        if r.publish:
+            said = [str(x) for x in (d.get("publish_to") or []) if x]
+            # Nothing named -> every connected store (same as the Publish card's default).
+            r.publish_to = match_stores(said, stores) if said else [st["id"] for st in stores]
         if r.price is not None and r.price <= 0:
             r.price = None
         if r.discount_pct is not None and not 1 <= r.discount_pct <= 95:
@@ -300,5 +321,5 @@ class GeminiListingAI:
             parts.append(f"stock {r.stock}")
         if r.free_shipping is not None:
             parts.append("free shipping" if r.free_shipping else "no free shipping")
-        r.confirmation_text = ("Set " + ", ".join(parts) + "?") if parts else "I didn't catch any values."
+        r.confirmation_text = confirmation(parts, r, stores)
         return r

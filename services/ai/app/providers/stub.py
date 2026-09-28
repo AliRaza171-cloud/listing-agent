@@ -6,7 +6,8 @@ provider by setting AI_PROVIDER in .env once that provider is implemented.
 """
 import re
 
-from app.providers.base import CommandResult, ListingDraft, ProductFacts, Research
+from app.providers.base import (ALL_WORDS, PLATFORM_WORDS, CommandResult, ListingDraft, ProductFacts, Research,
+                                confirmation, match_stores)
 
 
 class StubListingAI:
@@ -36,7 +37,8 @@ class StubListingAI:
             category_suggestion=facts.suggested_category,
         )
 
-    async def parse_command(self, text):
+    async def parse_command(self, text, stores=None):
+        stores = stores or []
         # Tiny rule-based parser so voice/typed commands can be tested offline.
         # The real provider handles Urdu / Roman Urdu / mixed phrasing properly.
         t = text.lower()
@@ -58,5 +60,17 @@ class StubListingAI:
             parts.append(f"stock {result.stock}")
         if result.free_shipping:
             parts.append("free shipping")
-        result.confirmation_text = ("Set " + ", ".join(parts) + "?") if parts else "I didn't catch any values."
+        if stores and re.search(r"\b(publish|upload|daal|dal|laga|post|send|bhej)", t):
+            result.publish = True
+            words = [w for w in ALL_WORDS if re.search(rf"\b{re.escape(w)}\b", t)]
+            words += [w for ws in PLATFORM_WORDS.values() for w in ws if re.search(rf"\b{re.escape(w)}\b", t)]
+            words += [st["name"] for st in stores if st["name"].lower() in t]
+            result.publish_to = match_stores(words, stores) if words else [st["id"] for st in stores]
+            if re.search(r"\blive\b", t):
+                result.publish_mode = "live"
+            elif "draft" in t:
+                result.publish_mode = "draft"
+            if "urdu" in t:
+                result.publish_language = "ur"
+        result.confirmation_text = confirmation(parts, result, stores)
         return result

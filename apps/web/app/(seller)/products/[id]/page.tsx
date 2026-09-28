@@ -135,7 +135,7 @@ export default function WorkspacePage() {
         </section>
 
         <div className="col">
-          <VoiceCard product={product} onSaved={setProduct} onNotice={setNotice} />
+          <VoiceCard product={product} stores={stores} onSaved={setProduct} onPublished={load} onNotice={setNotice} />
           <DetailsCard product={product} onSaved={setProduct} onNotice={setNotice} />
           <ResearchCard product={product} />
           <PublishCard product={product} stores={stores} onPublished={load} onNotice={setNotice} />
@@ -451,7 +451,7 @@ function ListingForm({ product, listing, onSaved, onNotice }: {
 
 // ---------------------------------------------------------------- voice commands
 
-function describe(r: CommandResult, p: Product): string | null {
+function describe(r: CommandResult, p: Product, stores: Store[]): string | null {
   const parts: string[] = [];
   if (r.price !== null) parts.push(`price ${rs(r.price)}`);
   if (r.remove_discount) parts.push("no discount");
@@ -462,10 +462,26 @@ function describe(r: CommandResult, p: Product): string | null {
   if (r.stock !== null) parts.push(`stock ${r.stock}`);
   if (r.sku) parts.push(`SKU ${r.sku}`);
   if (r.free_shipping !== null) parts.push(r.free_shipping ? "free shipping" : "no free shipping");
-  return parts.length ? `Set ${parts.join(", ")}?` : null;
+  const targets = publishTargets(r, stores);
+  const pub = targets.length
+    ? `publish to ${targets.map((s) => s.name).join(", ")} as ${(r.publish_mode ?? "draft") === "live" ? "live" : "a draft"}`
+      + (r.publish_language === "ur" ? " (Urdu)" : r.publish_language === "en" ? " (English)" : "")
+    : null;
+  if (parts.length && pub) return `Set ${parts.join(", ")} and ${pub}?`;
+  if (parts.length) return `Set ${parts.join(", ")}?`;
+  if (pub) return `${pub[0].toUpperCase()}${pub.slice(1)}?`;
+  return null;
 }
 
-function VoiceCard({ product, onSaved, onNotice }: { product: Product; onSaved: (p: Product) => void; onNotice: Notice }) {
+/** The connected stores a publish command points at (only active ones). */
+function publishTargets(r: CommandResult, stores: Store[]): Store[] {
+  if (!r.publish) return [];
+  return stores.filter((s) => s.status === "active" && r.publish_to.includes(s.id));
+}
+
+function VoiceCard({ product, stores, onSaved, onPublished, onNotice }: {
+  product: Product; stores: Store[]; onSaved: (p: Product) => void; onPublished: () => void; onNotice: Notice;
+}) {
   const [heard, setHeard] = useState<string | null>(null);
   const [result, setResult] = useState<CommandResult | null>(null);
   const [typed, setTyped] = useState("");
@@ -476,7 +492,7 @@ function VoiceCard({ product, onSaved, onNotice }: { product: Product; onSaved: 
     setResult(null);
     setWorking(true);
     try {
-      setResult(await parseCommand(text));
+      setResult(await parseCommand(text, stores.filter((s) => s.status === "active")));
     } catch (e) {
       onNotice({ kind: "error", text: errText(e, "Couldn't understand that.") });
       setHeard(null);
@@ -505,30 +521,54 @@ function VoiceCard({ product, onSaved, onNotice }: { product: Product; onSaved: 
     if (result.stock !== null) patch.stock = result.stock;
     if (result.sku) patch.sku = result.sku;
     if (result.free_shipping !== null) patch.free_shipping = result.free_shipping;
+    const targets = publishTargets(result, stores);
     setWorking(true);
     try {
-      onSaved(await updateProduct(product.id, patch));
-      onNotice({ kind: "ok", text: "Details saved." });
+      let current = product;
+      if (Object.keys(patch).length) {
+        current = await updateProduct(product.id, patch);
+        onSaved(current);
+      }
+      if (targets.length) {
+        // Same rules as the Publish card.
+        const langs = (["en", "ur"] as const).filter((l) => current.listings.some((x) => x.language === l));
+        const lang = result.publish_language && langs.includes(result.publish_language) ? result.publish_language : langs[0];
+        if (current.status !== "ready" || !lang) {
+          onNotice({ kind: "error", text: "Generate the listing first, then publish." });
+        } else if (current.price === null) {
+          onNotice({ kind: "error", text: "Set a price first — e.g. say “price 2500 and publish”." });
+        } else {
+          const mode = result.publish_mode ?? "draft";
+          await publishProduct(current.id, targets.map((s) => s.id), mode, lang);
+          onNotice({ kind: "ok", text: `Sending to ${targets.map((s) => s.name).join(", ")} as ${mode === "draft" ? "a draft" : "live"}…` });
+          onPublished();
+        }
+      } else {
+        onNotice({ kind: "ok", text: "Details saved." });
+      }
       setHeard(null);
       setResult(null);
     } catch (e) {
-      onNotice({ kind: "error", text: errText(e, "Couldn't save those details.") });
+      onNotice({ kind: "error", text: errText(e, targets.length ? "Couldn't publish." : "Couldn't save those details.") });
     } finally {
       setWorking(false);
     }
   }
 
-  const summary = result ? describe(result, product) : null;
+  const summary = result ? describe(result, product, stores) : null;
+  const unknownStore = !!result && result.publish && !publishTargets(result, stores).length;
 
   return (
     <section className="card heard">
       <div className="kicker"><MicIcon size={16} style={{ color: "var(--flame)" }} />
-        {heard ? "I heard" : "Say or type price, discount, stock"}
+        {heard ? "I heard" : "Say or type price, stock — or “publish”"}
       </div>
       {heard && <div className="said">“{heard}”</div>}
       {working && !recorder.recording && <span className="spinner" style={{ color: "var(--side-text)" }} />}
       {result && (
-        <div className="confirm">{summary ?? "I didn’t catch any values — try “price 2500, 10 percent off, stock 20”."}</div>
+        <div className="confirm">{summary ?? (unknownStore
+          ? "I couldn’t tell which store you meant — say its name, or “all stores”."
+          : "I didn’t catch any values — try “price 2500, 10 percent off, stock 20” or “publish to Shopify”.")}</div>
       )}
       {result && summary && (
         <div style={{ display: "flex", gap: 10 }}>
@@ -539,7 +579,7 @@ function VoiceCard({ product, onSaved, onNotice }: { product: Product; onSaved: 
       {!result && !working && (
         <form className="cmd-row" onSubmit={(e) => { e.preventDefault(); if (typed.trim()) { understand(typed.trim()); setTyped(""); } }}>
           <input className="input" style={{ background: "var(--side-item)", border: "1px solid #4A463E", color: "var(--bg)" }}
-            placeholder="price 2500, 10% off, stock 20" aria-label="Type a command"
+            placeholder="price 2500, stock 20, publish to Shopify" aria-label="Type a command"
             value={typed} onChange={(e) => setTyped(e.target.value)} />
           <button type="button" className={`icon-btn${recorder.recording ? " recording" : ""}`}
             style={{ background: recorder.recording ? undefined : "var(--flame)" }}
