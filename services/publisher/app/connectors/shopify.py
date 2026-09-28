@@ -1,7 +1,10 @@
 """Shopify connector (Admin GraphQL API).
 
-Credentials: access_token — the Admin API access token of a custom app installed on the store,
-with scopes write_products (required), read_locations + write_inventory (stock), write_publications
+Credentials, either:
+- access_token — an Admin API access token (from our OAuth app, or a legacy custom app), or
+- client_id + client_secret — a Dev Dashboard app installed on a store in the same Shopify
+  organization. We swap them for a 24-hour token (client credentials grant) and renew it as needed.
+Scopes: write_products (required), read_locations + write_inventory (stock), write_publications
 (show live products in the Online Store). Store URL: https://<shop>.myshopify.com
 
 One productSet call creates or updates the whole product. Photos are uploaded as files through
@@ -9,10 +12,12 @@ Shopify's staged uploads, so they don't need to be on the public internet.
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import os
 import re
+import time
 
 import httpx
 
@@ -20,6 +25,9 @@ from app.connectors.base import ConnectorError, ProductPayload, PublishResult, S
 
 log = logging.getLogger("lagent.publisher.shopify")
 TIMEOUT = httpx.Timeout(45.0, connect=10.0)
+# (shop, client_id, secret fingerprint) -> (token, expires_at). Client-credential tokens last 24 h;
+# reuse until near expiry. The secret is part of the key so a wrong/changed secret is never served a cached token.
+_TOKENS: dict[tuple[str, str, str], tuple[str, float]] = {}
 
 PRODUCT_SET = """
 mutation ProductSet($input: ProductSetInput!, $identifier: ProductSetIdentifiers) {
@@ -49,10 +57,50 @@ class ShopifyConnector:
     def __init__(self, store_url: str, credentials: dict):
         self.shop = _shop_domain(store_url)
         self.token = (credentials.get("access_token") or "").strip()
+        self.client_id = (credentials.get("client_id") or "").strip()
+        self.client_secret = (credentials.get("client_secret") or "").strip()
+        self.uses_client_credentials = not self.token and bool(self.client_id and self.client_secret)
         version = os.environ.get("SHOPIFY_API_VERSION", "2026-07")
         self.endpoint = f"https://{self.shop}/admin/api/{version}/graphql.json"
 
-    async def _gql(self, query: str, variables: dict | None = None) -> dict:
+    def _cache_key(self) -> tuple[str, str, str]:
+        return self.shop, self.client_id, hashlib.sha256(self.client_secret.encode()).hexdigest()[:16]
+
+    async def _client_token(self, *, fresh: bool = False) -> str:
+        key = self._cache_key()
+        cached = _TOKENS.get(key)
+        if cached and not fresh and cached[1] > time.time() + 300:
+            return cached[0]
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                r = await client.post(f"https://{self.shop}/admin/oauth/access_token", data={
+                    "grant_type": "client_credentials", "client_id": self.client_id, "client_secret": self.client_secret})
+        except httpx.HTTPError:
+            raise ConnectorError(f"Couldn't reach {self.shop}.", retryable=True)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        token = body.get("access_token") if r.status_code == 200 else None
+        if not token:
+            err = str(body.get("error_description") or body.get("error") or body.get("errors") or "").strip()
+            if r.status_code == 404:
+                raise ConnectorError(f"No Shopify store at {self.shop}.")
+            if "cannot be performed on this shop" in err.lower() or "shop_not_permitted" in err.lower():
+                raise ConnectorError("Shopify says this app can't be used on this store. The app must be created in the "
+                                     "same Shopify account (organization) as the store, and installed on it.")
+            if r.status_code in (400, 401) and ("client" in err.lower() or not err):
+                raise ConnectorError("Shopify rejected the Client ID or Client secret. Copy both again from the app's "
+                                     "Settings in the Dev Dashboard, and check the app is installed on this store.")
+            if r.status_code == 429 or r.status_code >= 500:
+                raise ConnectorError(f"Shopify had a problem ({r.status_code}). We'll retry.", retryable=True)
+            raise ConnectorError(f"Shopify didn't give an access token{': ' + err[:150] if err else ''}.")
+        _TOKENS[key] = (token, time.time() + float(body.get("expires_in") or 86399))
+        return token
+
+    async def _gql(self, query: str, variables: dict | None = None, *, _retry: bool = True) -> dict:
+        if self.uses_client_credentials:
+            self.token = await self._client_token()
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 r = await client.post(self.endpoint, json={"query": query, "variables": variables or {}},
@@ -61,6 +109,10 @@ class ShopifyConnector:
             raise ConnectorError("Shopify took too long to answer.", retryable=True)
         except httpx.HTTPError:
             raise ConnectorError(f"Couldn't reach {self.shop}.", retryable=True)
+        if r.status_code == 401 and self.uses_client_credentials and _retry:
+            _TOKENS.pop(self._cache_key(), None)   # expired or revoked early: get a new one once
+            self.token = await self._client_token(fresh=True)
+            return await self._gql(query, variables, _retry=False)
         if r.status_code in (401, 403):
             raise ConnectorError("Shopify rejected the access token (or the app lacks the needed scopes).")
         if r.status_code == 404:
@@ -79,7 +131,9 @@ class ShopifyConnector:
     # ---------------------------------------------------------------- interface
 
     async def test_connection(self) -> None:
-        if not self.token.startswith("shp"):
+        if not self.token and not self.uses_client_credentials:
+            raise ConnectorError("Enter an Admin API access token, or the app's Client ID and Client secret.")
+        if self.token and not self.token.startswith("shp"):
             raise ConnectorError("That isn't a Shopify access token (they start with shp…).")
         data = await self._gql("{ shop { name } }")
         if not (data.get("shop") or {}).get("name"):

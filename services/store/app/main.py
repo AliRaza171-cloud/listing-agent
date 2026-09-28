@@ -68,8 +68,15 @@ log = logging.getLogger("lagent.store")
 REQUIRED_CREDENTIALS = {
     "woocommerce": {"consumer_key", "consumer_secret"},
     "custom": {"api_key"},
-    "shopify": {"access_token"},
+    "shopify": {"access_token"},   # or client_id + client_secret (see _missing)
 }
+
+
+def _missing(platform: str, credentials: dict) -> set[str]:
+    have = {k for k, v in credentials.items() if str(v or "").strip()}
+    if platform == "shopify" and {"client_id", "client_secret"} <= have:
+        return set()
+    return REQUIRED_CREDENTIALS[platform] - have
 
 
 class StoreConnection(Base):
@@ -167,8 +174,10 @@ def _save(db: Session, user_id, platform: str, name: str, store_url: str, creden
 async def connect_store(data: ConnectIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     if data.store_url.lower().startswith("http://") and not settings.ALLOW_HTTP_STORES:
         raise HTTPException(422, "The store address must start with https://")
-    missing = REQUIRED_CREDENTIALS[data.platform] - set(data.credentials)
+    missing = _missing(data.platform, data.credentials)
     if missing:
+        if data.platform == "shopify":
+            raise HTTPException(422, "Enter an Admin API access token, or the app's Client ID and Client secret.")
         raise HTTPException(422, f"Missing: {', '.join(sorted(missing))}")
     store_url = data.store_url.rstrip("/")
     try:
@@ -238,8 +247,11 @@ def _shop_domain(raw: str) -> str:
 
 @router.get("/connect/options")
 def connect_options():
-    return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET), "woocommerce": True,
-            "custom": True}
+    # WordPress only sends keys to an https callback it can reach, so WooCommerce one-click needs
+    # Listing Agent online (PUBLIC_BASE_URL). On a PC, sellers use API keys instead.
+    online = settings.api_base.lower().startswith("https://")
+    return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET) and online,
+            "woocommerce": online, "custom": True}
 
 
 def _reachable(url: str) -> str:

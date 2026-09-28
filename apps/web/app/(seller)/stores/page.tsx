@@ -12,15 +12,24 @@ type Field = { key: string; label: string; placeholder: string; secret?: boolean
 
 // Manual (API key) forms. For Shopify and WooCommerce these sit under "Advanced" — most sellers
 // use the one-click Connect button instead.
-const FORMS: Record<Platform, { intro: string; urlLabel: string; urlPlaceholder: string; fields: Field[] }> = {
+const FORMS: Record<Platform, {
+  intro: string; urlLabel: string; urlPlaceholder: string; fields: Field[];
+  ready?: (creds: Record<string, string>) => boolean;
+}> = {
   shopify: {
-    intro: "Paste an Admin API access token from a custom app with the scopes write_products, write_inventory, read_locations and write_publications.",
+    intro: "In Shopify’s Dev Dashboard (dev.shopify.com), create an app with the scopes write_products, write_inventory, read_locations and write_publications, release it and install it on your store. Then paste its Client ID and Client secret here (from the app’s Settings). Have an older shpat_… token instead? Paste that and leave the other two empty.",
     urlLabel: "Store address",
     urlPlaceholder: "https://yourstore.myshopify.com",
-    fields: [{ key: "access_token", label: "Admin API access token", placeholder: "shpat_…", secret: true }],
+    fields: [
+      { key: "client_id", label: "Client ID", placeholder: "From the app’s Settings", optional: true },
+      { key: "client_secret", label: "Client secret", placeholder: "From the app’s Settings", secret: true, optional: true },
+      { key: "access_token", label: "…or Admin API access token", placeholder: "shpat_…", secret: true, optional: true },
+    ],
+    // Either a token, or both Client ID and secret.
+    ready: (c) => Boolean(c.access_token || (c.client_id && c.client_secret)),
   },
   woocommerce: {
-    intro: "WooCommerce → Settings → Advanced → REST API → Add key with Read/Write access.",
+    intro: "In WordPress: WooCommerce → Settings → Advanced → REST API → Add key. Pick your admin user, Permissions: Read/Write, Generate — then copy both keys here. For photos, also add an Application password (Users → Profile → Application Passwords).",
     urlLabel: "Store URL",
     urlPlaceholder: "https://yourstore.com",
     fields: [
@@ -229,7 +238,9 @@ function OneClickCard({ platform, available, onConnected }: {
         </form>
       )}
       {available === false && (
-        <p className="small muted">One-click connect for {PLATFORM_NAMES[platform]} isn’t set up on this server yet — use API keys:</p>
+        <p className="small muted">
+          One-click connect for {PLATFORM_NAMES[platform]} works once Listing Agent is online (it needs a secure https address). For now, use API keys:
+        </p>
       )}
       {available !== false && (
         <button type="button" className="link-btn small" style={{ alignSelf: "flex-start" }} onClick={() => setAdvanced(!advanced)}>
@@ -280,7 +291,8 @@ function ManualForm({ platform, onConnected }: { platform: Platform; onConnected
     }
   }
 
-  const complete = url.trim() && cfg.fields.every((f) => f.optional || (creds[f.key] ?? "").trim());
+  const trimmed = Object.fromEntries(cfg.fields.map((f) => [f.key, (creds[f.key] ?? "").trim()]));
+  const complete = url.trim() && cfg.fields.every((f) => f.optional || trimmed[f.key]) && (cfg.ready ? cfg.ready(trimmed) : true);
 
   return (
     <form onSubmit={submit} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
