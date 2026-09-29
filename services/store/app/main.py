@@ -298,6 +298,33 @@ async def _shopify_from_address(raw: str) -> str:
     return found.store
 
 
+# Where the other cards are, for "wrong card" messages
+_WRONG_CARD = {"shopify": "the Shopify card", "custom": "the Custom store card", "daraz": "the Daraz button",
+               "ebay": "the eBay card"}
+
+
+async def _woocommerce_site(raw: str) -> str:
+    """Checks the site before sending the seller to it: a site that is clearly something else (Shopify,
+    Wix, WordPress without WooCommerce…) gets a clear message instead of a dead page. If we can't tell,
+    we let WordPress decide (some shops hide the signs we look for)."""
+    url = _woo_url(raw)
+    try:
+        found = await detect.detect(url, _http, allow_local=settings.ALLOW_HTTP_STORES, alias=settings.STORE_LOCALHOST_ALIAS)
+    except detect.DetectError as exc:
+        raise HTTPException(422, str(exc))
+    if found.platform == "woocommerce":
+        return found.store or url          # e.g. the www. address the site really uses
+    if found.platform == "unknown":
+        return url
+    host = urlsplit(url).hostname
+    if found.platform == "wordpress":
+        raise HTTPException(422, f"{host} is a WordPress site without WooCommerce. Install the free WooCommerce plugin first.")
+    where = _WRONG_CARD.get(found.platform)
+    if where:
+        raise HTTPException(422, f"{host} is a {found.name} store, not WooCommerce — use {where} (or the “Your store’s address” box above).")
+    raise HTTPException(422, f"{host} runs on {found.name}, not WooCommerce. Listing Agent can't publish to {found.name} yet.")
+
+
 def _shop_domain(raw: str) -> str:
     shop = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
     if "." not in shop:
@@ -416,10 +443,10 @@ async def custom_callback(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/connect/woocommerce")
-def start_woocommerce(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+async def start_woocommerce(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     """WooCommerce's built-in app approval (wc-auth/v1/authorize): the seller logs in to WordPress,
     clicks Approve, and WooCommerce sends new read/write keys to our callback."""
-    url = _woo_url(data.store)
+    url = await _woocommerce_site(data.store)
     req = _new_request(db, user_id, "woocommerce", (data.name or "").strip() or urlsplit(url).hostname, url)
     query = urlencode({
         "app_name": "Listing Agent",
