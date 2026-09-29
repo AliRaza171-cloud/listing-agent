@@ -1,5 +1,7 @@
 # Putting Listing Agent online
 
+(Examples use `listingagent.duckdns.org`; with your own domain use `api.yourdomain.com` instead.)
+
 What goes where:
 
 | Part | Where | Cost |
@@ -103,6 +105,9 @@ Then open your Vercel site, sign up, and you're live.
   (Their WordPress needs "pretty" permalinks, i.e. anything except *Plain*.)
 - **Shopify (one time, by you):** in the **Shopify Dev Dashboard** (dev.shopify.com, free) create an app
   "Listing Agent":
+  - **App URL:** `https://listingagent.duckdns.org/api/store/shopify/install` — where merchants land after
+    clicking Install in the Shopify App Store (or opening the app in their admin). Listing Agent checks
+    Shopify's signature, signs them in (or up) and connects their shop by itself.
   - **Redirect URL:** `https://listingagent.duckdns.org/api/store/connect/shopify/callback`
   - **Scopes:** `write_products, read_locations, write_inventory, write_publications`
   - Copy its **Client ID** and **Client secret** into `.env` as `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`,

@@ -35,7 +35,7 @@ export default function SellerLayout({ children }: { children: ReactNode }) {
   useEffect(() => {
     const session = getSession();
     if (!session) {
-      router.replace(`/login?next=${encodeURIComponent(window.location.pathname)}`);
+      router.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
       return;
     }
     setUser(session.user);

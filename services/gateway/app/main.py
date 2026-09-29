@@ -60,6 +60,7 @@ PUBLIC = {
     ("store", "GET", "connect/daraz/callback"), ("store", "GET", "connect/ebay/callback"),
     ("store", "GET", "ebay/account-deletion"), ("store", "POST", "ebay/account-deletion"),  # eBay requires this
     ("store", "POST", "shopify/webhooks"),   # verified with Shopify's HMAC header
+    ("store", "GET", "shopify/install"),     # Shopify App URL: merchants arrive here from the App Store
     ("store", "POST", "connect/custom/callback"),  # Smart Click etc. send the approved key here
 }
 # X- headers are normally dropped (they could spoof ours); these provider signatures are kept.

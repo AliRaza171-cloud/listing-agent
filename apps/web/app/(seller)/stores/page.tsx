@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   myMarket,
   type ConnectOptions,
@@ -84,6 +84,9 @@ function Stores() {
   const returning = params.get("connect");
   const expired = params.get("connect_error") === "expired";
   const denied = params.get("denied") === "1";
+  // Arrived from the Shopify App Store / Shopify admin (our App URL sends the shop here).
+  const shopifyInstall = (params.get("shopify_install") || "").toLowerCase();
+  const installStarted = useRef(false);
 
   const [stores, setStores] = useState<Store[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +105,30 @@ function Stores() {
     load();
     getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false, daraz: false, ebay: false }));
   }, [load]);
+
+  // From the Shopify App Store: connect that shop straight away (Shopify then asks the merchant
+  // to approve). If it's already connected — the merchant just opened the app from their admin —
+  // there's nothing to do.
+  useEffect(() => {
+    if (!shopifyInstall || installStarted.current || stores === null || oneClick === null) return;
+    installStarted.current = true;
+    if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shopifyInstall)) return;
+    const already = stores.find((s) => s.platform === "shopify" && s.status === "active"
+      && s.store_url.replace(/\/$/, "").toLowerCase() === `https://${shopifyInstall}`);
+    if (already) {
+      setResult({ kind: "ok", text: `${already.name} is connected. You can publish to it now.` });
+      window.history.replaceState(null, "", "/stores");
+      return;
+    }
+    if (!oneClick.shopify) {
+      setResult({ kind: "error", text: "Shopify connections aren’t switched on yet. Please try again later." });
+      return;
+    }
+    setResult({ kind: "wait", text: `Connecting ${shopifyInstall}…` });
+    startConnect("shopify", shopifyInstall)
+      .then(({ authorize_url }) => { window.location.href = authorize_url; })
+      .catch((e) => setResult({ kind: "error", text: e instanceof ApiError ? e.message : "Couldn't start the Shopify connection." }));
+  }, [shopifyInstall, stores, oneClick]);
 
   // Back from Shopify / WordPress: wait for the connection to be confirmed.
   useEffect(() => {

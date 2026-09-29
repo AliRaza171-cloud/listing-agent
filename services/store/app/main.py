@@ -419,6 +419,21 @@ def shopify_hmac_ok(params: dict[str, str], secret: str) -> bool:
     return bool(given) and hmac.compare_digest(expected, given)
 
 
+@router.get("/shopify/install")
+def shopify_install(request: Request):
+    """Public. Shopify's App URL: where a merchant lands after clicking Install in the Shopify App
+    Store (and each time they open the app from their Shopify admin). We check Shopify's signature,
+    then hand the shop to the web app's Stores page, which signs the merchant in (or up) and starts
+    the normal OAuth connect for that shop. Nothing is saved here: the token only arrives in
+    shopify_callback, after the merchant approves in their own Shopify admin."""
+    params = dict(request.query_params)
+    stores_page = f"{settings.APP_URL.rstrip('/')}/stores"
+    shop = params.get("shop", "").lower()
+    if not (settings.SHOPIFY_CLIENT_SECRET and SHOP_RE.match(shop) and shopify_hmac_ok(params, settings.SHOPIFY_CLIENT_SECRET)):
+        return RedirectResponse(stores_page, status_code=303)
+    return RedirectResponse(f"{stores_page}?{urlencode({'shopify_install': shop})}", status_code=303)
+
+
 @router.get("/connect/shopify/callback")
 async def shopify_callback(request: Request, db: Session = Depends(get_db)):
     """Public (the seller's browser comes back here from Shopify)."""

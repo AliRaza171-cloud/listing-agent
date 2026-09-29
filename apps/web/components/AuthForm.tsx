@@ -22,6 +22,15 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
   useEffect(() => setCountry(guessCountry()), []);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Carry "where to go after signing in" across the Sign in / Create account links
+  // (e.g. a merchant arriving from the Shopify App Store without an account yet).
+  const [keepNext, setKeepNext] = useState("");
+  const [fromShopify, setFromShopify] = useState(false);
+  useEffect(() => {
+    const next = new URLSearchParams(window.location.search).get("next");
+    if (next) setKeepNext(`?next=${encodeURIComponent(next)}`);
+    setFromShopify(Boolean(next?.includes("shopify_install=")));
+  }, []);
 
   useEffect(() => {
     if (getSession()) router.replace(nextPath());
@@ -69,6 +78,12 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
             </p>
           </div>
 
+          {fromShopify && (
+            <div className="alert alert-info" role="status">
+              {isSignup ? "Create your account to finish connecting your Shopify store."
+                : "Sign in — or create an account below — to finish connecting your Shopify store."}
+            </div>
+          )}
           {error && <div className="alert alert-error" role="alert">{error}</div>}
 
           {isSignup && (
@@ -107,8 +122,8 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
           )}
 
           <p className="muted" style={{ textAlign: "center" }}>
-            {isSignup ? <>Already have an account? <Link href="/login">Sign in</Link></>
-              : <>New here? <Link href="/signup">Create an account</Link></>}
+            {isSignup ? <>Already have an account? <Link href={`/login${keepNext}`}>Sign in</Link></>
+              : <>New here? <Link href={`/signup${keepNext}`}>Create an account</Link></>}
           </p>
         </form>
       </main>
