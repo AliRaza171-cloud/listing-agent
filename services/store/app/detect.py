@@ -19,7 +19,8 @@ import httpx
 MAX_BYTES = 400_000          # enough for any homepage's <head>; we never download more
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 MAX_REDIRECTS = 4
-UA = {"User-Agent": "ListingAgent/1.0 (+https://www.ecommercelistingagent.com)", "Accept": "text/html,application/json,*/*"}
+UA = {"User-Agent": "Mozilla/5.0 (compatible; ListingAgent/1.0; +https://www.ecommercelistingagent.com)",
+      "Accept": "text/html,application/json;q=0.9,*/*;q=0.8", "Accept-Language": "en"}
 
 
 class DetectError(Exception):
@@ -115,7 +116,10 @@ async def safe_get(http: httpx.AsyncClient, url: str, *, allow_local: bool = Fal
                     body += chunk
                     if len(body) >= MAX_BYTES:
                         break
-                return httpx.Response(r.status_code, headers=r.headers, content=body[:MAX_BYTES],
+                # aiter_bytes() already un-gzipped the body: drop the encoding headers so it isn't decoded twice
+                headers = [(k, v) for k, v in r.headers.multi_items()
+                           if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+                return httpx.Response(r.status_code, headers=headers, content=body[:MAX_BYTES],
                                       request=httpx.Request("GET", url))
         except (httpx.HTTPError, ValueError):
             return None
