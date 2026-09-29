@@ -5,7 +5,7 @@ import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent } fr
 import {
   isEmbedded, myMarket,
   type ConnectOptions,
-  ApiError, confirmConnect, connectStore, disconnectStore, getConnectOptions, getConnectRequest, listStores, startConnect, type Store,
+  ApiError, confirmConnect, connectStore, detectStore, disconnectStore, getConnectOptions, getConnectRequest, listStores, startConnect, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
 
@@ -245,10 +245,12 @@ function Stores() {
       </section>
 
       <h2 className="display" style={{ fontWeight: 800, fontSize: 24, marginTop: 8 }}>Connect a store</h2>
+      <SmartConnect options={oneClick} />
+      <p className="small muted" style={{ margin: "4px 0 0" }}>Or pick your platform:</p>
       <div className="connect-grid">
         {/* Inside the Shopify admin this shop is already connected, so no Shopify card there. */}
         {(["woocommerce", "shopify", "daraz", "custom"] as const).filter((p) => !(p === "shopify" && isEmbedded())).map((p) => (
-          <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load}
+          <OneClickCard key={p} platform={p} id={`connect-${p}`} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load}
             appStoreUrl={p === "shopify" ? oneClick?.shopify_app_store_url ?? null : null} />
         ))}
         <EbayCard available={oneClick ? Boolean(oneClick.ebay) : null} marketplaces={oneClick?.ebay_marketplaces ?? []} />
@@ -261,8 +263,75 @@ function Stores() {
   );
 }
 
-function OneClickCard({ platform, available, onConnected, appStoreUrl = null }: {
-  platform: OneClick; available: boolean | null; onConnected: () => void; appStoreUrl?: string | null;
+/** One box for any store address: works out the platform and starts the right connection. */
+function SmartConnect({ options }: { options: ConnectOptions | null }) {
+  const [address, setAddress] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "info" | "error"; text: string } | null>(null);
+
+  function goTo(card: string, text: string) {
+    setMsg({ kind: "info", text });
+    document.getElementById(`connect-${card}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  async function go(e: FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setBusy(true);
+    try {
+      const d = await detectStore(address.trim());
+      const start = async (platform: "woocommerce" | "shopify" | "custom", store: string) => {
+        setMsg({ kind: "info", text: `${d.name} found — taking you there to approve Listing Agent…` });
+        const { authorize_url } = await startConnect(platform, store);
+        window.location.href = authorize_url;
+      };
+      if (d.platform === "woocommerce" && options?.woocommerce) return await start("woocommerce", d.store);
+      if (d.platform === "custom") return await start("custom", d.store);
+      if (d.platform === "shopify") {
+        if (isEmbedded()) { setMsg({ kind: "info", text: "You're already in Shopify — this store is connected." }); setBusy(false); return; }
+        if (options?.shopify_app_store_url) {
+          setMsg({ kind: "info", text: "Shopify store found. Install Listing Agent from the Shopify App Store — it connects by itself." });
+          window.open(options.shopify_app_store_url, "_blank", "noopener"); setBusy(false); return;
+        }
+        if (options?.shopify && d.store) return await start("shopify", d.store);
+        setBusy(false);
+        return goTo("shopify", d.note || "This is a Shopify store — use the Shopify card below.");
+      }
+      setBusy(false);
+      if (d.platform === "woocommerce") return goTo("woocommerce", "WooCommerce store found. Use the WooCommerce card below (API keys).");
+      if (d.platform === "daraz") return goTo("daraz", d.note);
+      if (d.platform === "ebay") return goTo("ebay", d.note);
+      setMsg({ kind: "error", text: d.note || "Listing Agent can't connect to this store yet." });
+    } catch (err) {
+      setMsg({ kind: "error", text: err instanceof ApiError ? err.message : "Couldn't check that address. Try again." });
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <form onSubmit={go} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <div className="display">Your store’s address</div>
+          <p className="small muted" style={{ margin: "4px 0 0" }}>
+            Type your shop’s website. Listing Agent checks what it runs on (WooCommerce, Shopify, Smart Click…) and connects it.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input className="input" name="store-address" value={address} placeholder="yourstore.com" inputMode="url"
+            onChange={(e) => setAddress(e.target.value)} style={{ flex: "1 1 240px" }} aria-label="Your store’s address" />
+          <button className="btn btn-primary" disabled={busy || !address.trim() || options === null}>
+            {busy && <span className="spinner" />}Connect
+          </button>
+        </div>
+        {msg && <div className={`alert alert-${msg.kind}`} role={msg.kind === "error" ? "alert" : "status"}>{msg.text}</div>}
+      </form>
+    </section>
+  );
+}
+
+function OneClickCard({ platform, available, onConnected, appStoreUrl = null, id }: {
+  platform: OneClick; available: boolean | null; onConnected: () => void; appStoreUrl?: string | null; id?: string;
 }) {
   const cfg = ONE_CLICK[platform];
   const [store, setStore] = useState("");
@@ -286,7 +355,7 @@ function OneClickCard({ platform, available, onConnected, appStoreUrl = null }: 
   }
 
   return (
-    <section className="card">
+    <section className="card" id={id}>
       <div className="display">{PLATFORM_NAMES[platform]}</div>
       {appStoreUrl && available !== false ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -355,7 +424,7 @@ function EbayCard({ available, marketplaces }: {
   }
 
   return (
-    <section className="card">
+    <section className="card" id="connect-ebay">
       <div className="display">eBay</div>
       {available === false ? (
         <p className="small muted">

@@ -33,6 +33,7 @@ from lagent_common.db import make_db
 from lagent_common.internal import current_user_id, require_internal
 from lagent_common.service import create_service
 
+from app import detect
 from app.crypto import decrypt_credentials, encrypt_credentials
 
 
@@ -309,16 +310,30 @@ def _reachable(url: str) -> str:
     return parts.geturl()
 
 
+class DetectIn(BaseModel):
+    store: str = Field(min_length=3, max_length=300)
+
+
+@router.post("/connect/detect")
+async def detect_store(data: DetectIn, user_id: uuid.UUID = Depends(current_user_id)):
+    """The Stores page's single address box: which platform runs this site, and can we connect to it?"""
+    try:
+        found = await detect.detect(data.store, _http, allow_local=settings.ALLOW_HTTP_STORES,
+                                    alias=settings.STORE_LOCALHOST_ALIAS)
+    except detect.DetectError as exc:
+        raise HTTPException(422, str(exc))
+    log.info("store detect: %s -> %s", urlsplit(detect.normalize(data.store, allow_http=True)).hostname, found.platform)
+    return found.out()
+
+
 @router.post("/connect/custom")
 async def start_custom(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     """Smart Click and other sites that support Listing Agent: the seller types the WEBSITE address;
     the site tells us where its API is (/listing-agent/discover), and its admin approves on the site."""
     site = _woo_url(data.store)   # same normalising/https rules as WooCommerce
-    try:
-        r = await _http.get(_reachable(f"{site}/listing-agent/discover"), timeout=15, follow_redirects=True)
-        info = r.json() if r.status_code == 200 else None
-    except (httpx.HTTPError, ValueError):
-        info = None
+    r = await detect.safe_get(_http, f"{site}/listing-agent/discover", allow_local=settings.ALLOW_HTTP_STORES,
+                              alias=settings.STORE_LOCALHOST_ALIAS)
+    info = detect._json(r)
     api_url = str((info or {}).get("api_url") or "").rstrip("/")
     if not info or not re.match(r"^https?://", api_url):
         raise HTTPException(422, "This website doesn't support one-click connect yet. Use “Advanced” and enter its "

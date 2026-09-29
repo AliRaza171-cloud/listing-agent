@@ -388,6 +388,10 @@ export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "d
   api<{ request_id: string; authorize_url: string }>(`store/connect/${platform}`, {
     method: "POST", json: { store, name: name || null, ...(extra ?? {}) },
   });
+export type DetectedStore = { platform: string; name: string; supported: boolean; store: string; note: string };
+/** The Stores page's single address box: which platform runs this site? */
+export const detectStore = (store: string) =>
+  api<DetectedStore>("store/connect/detect", { method: "POST", json: { store } });
 export const getConnectRequest = (id: string) => api<ConnectRequest>(`store/connect/requests/${id}`);
 /** Shopify Connect: back from Shopify with a one-time code (#confirm=…) — only the account that started it can finish it. */
 export const confirmConnect = (id: string, code: string) =>
