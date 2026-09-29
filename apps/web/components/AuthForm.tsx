@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, getSession, login, register } from "@/lib/api";
+import { guessCountry, MARKETS } from "@/lib/markets";
 import { LogoMark } from "./Icons";
 
 function nextPath(): string {
@@ -17,6 +18,8 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [country, setCountry] = useState("PK");
+  useEffect(() => setCountry(guessCountry()), []);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -33,7 +36,7 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
     }
     setBusy(true);
     try {
-      if (mode === "signup") await register(email.trim(), password, name.trim());
+      if (mode === "signup") await register(email.trim(), password, name.trim(), country);
       else await login(email.trim(), password);
       router.replace(nextPath());
     } catch (err) {
@@ -52,7 +55,7 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
         </Link>
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <h2>Photo in.<br />Listing out.<br /><span style={{ color: "var(--flame)" }}>Published.</span></h2>
-          <p>Your first 10 listings are free. English and Urdu, ready for Shopify, WooCommerce or your own store.</p>
+          <p>Your first 10 listings are free. In English (and Urdu), ready for Shopify, WooCommerce, eBay, Daraz or your own store.</p>
         </div>
         <span className="small" style={{ color: "var(--side-muted)" }}>© Listing Agent</span>
       </aside>
@@ -71,6 +74,14 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
           {isSignup && (
             <label className="field">Your name
               <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+            </label>
+          )}
+          {isSignup && (
+            <label className="field">Where do you sell?
+              <select className="input" value={country} onChange={(e) => setCountry(e.target.value)} name="country">
+                {MARKETS.map((m) => <option key={m.code} value={m.code}>{m.name} ({m.currency})</option>)}
+              </select>
+              <span className="small muted" style={{ fontWeight: 400 }}>Your prices and the AI’s price research use this country’s currency.</span>
             </label>
           )}
           <label className="field">Email

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, declarative_base
 from lagent_common.bus import EventBus
 from lagent_common.db import make_db
 from lagent_common.internal import current_user_id, require_internal
+from lagent_common.markets import CURRENCIES, MARKETS, currency_for
 from lagent_common.service import create_service
 
 
@@ -44,13 +45,45 @@ class User(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     failed_logins = Column(Integer, default=0, nullable=False)
     locked_until = Column(DateTime)
+    country = Column(String(2), default="PK", nullable=False)     # where the seller sells
+    currency = Column(String(3), default="PKR", nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+def _country_ok(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip().upper()
+    if v not in MARKETS:
+        raise ValueError("Pick a country from the list.")
+    return v
+
+
+def _currency_ok(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip().upper()
+    if v not in CURRENCIES:
+        raise ValueError("Pick a currency from the list.")
+    return v
 
 
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str
     full_name: str | None = None
+    country: str | None = None       # defaults to Pakistan
+    currency: str | None = None      # defaults to the country's currency
+
+    @field_validator("country")
+    @classmethod
+    def _c(cls, v):
+        return _country_ok(v)
+
+    @field_validator("currency")
+    @classmethod
+    def _cur(cls, v):
+        return _currency_ok(v)
 
     @field_validator("password")
     @classmethod
@@ -58,6 +91,27 @@ class RegisterIn(BaseModel):
         if len(v) < 8 or v.isalpha() or v.isdigit():
             raise ValueError("Use at least 8 characters with letters and numbers.")
         return v
+
+
+class MeIn(BaseModel):
+    full_name: str | None = None
+    country: str | None = None
+    currency: str | None = None      # omitted with a new country = that country's currency
+
+    @field_validator("country")
+    @classmethod
+    def _c(cls, v):
+        return _country_ok(v)
+
+    @field_validator("currency")
+    @classmethod
+    def _cur(cls, v):
+        return _currency_ok(v)
+
+
+def _user_out(user: "User") -> dict:
+    return {"id": str(user.id), "email": user.email, "full_name": user.full_name,
+            "country": user.country or "PK", "currency": user.currency or "PKR"}
 
 
 class LoginIn(BaseModel):
@@ -72,7 +126,7 @@ def _token(user: User) -> dict:
         "access_token": token,
         "token_type": "bearer",
         "expires_in": settings.ACCESS_TOKEN_MINUTES * 60,
-        "user": {"id": str(user.id), "email": user.email, "full_name": user.full_name},
+        "user": _user_out(user),
     }
 
 
@@ -81,7 +135,9 @@ router = APIRouter(dependencies=[Depends(require_internal)])
 
 @router.post("/register", status_code=201)
 async def register(data: RegisterIn, db: Session = Depends(get_db)):
-    user = User(email=data.email.lower(), hashed_password=pwd.hash(data.password), full_name=data.full_name)
+    country = data.country or "PK"
+    user = User(email=data.email.lower(), hashed_password=pwd.hash(data.password), full_name=data.full_name,
+                country=country, currency=data.currency or currency_for(country))
     db.add(user)
     try:
         db.commit()
@@ -120,7 +176,25 @@ def me(user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "User not found.")
-    return {"id": str(user.id), "email": user.email, "full_name": user.full_name}
+    return _user_out(user)
+
+
+@router.patch("/me")
+def update_me(data: MeIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    """Settings: name, and where the seller sells (country + currency)."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found.")
+    fields = data.model_dump(exclude_unset=True)
+    if "full_name" in fields:
+        user.full_name = (fields["full_name"] or "").strip() or None
+    if fields.get("country"):
+        user.country = fields["country"]
+        user.currency = fields.get("currency") or currency_for(user.country)
+    elif fields.get("currency"):
+        user.currency = fields["currency"]
+    db.commit()
+    return _user_out(user)
 
 
 app = create_service(

@@ -17,6 +17,7 @@ from lagent_common.gemini import GeminiClient, GeminiError, Part
 from app.providers.base import (CommandResult, ListingDraft, ProductFacts, Research, ResearchSource, confirmation,
                                 match_stores)
 from app.providers.images import load_photos
+from lagent_common.markets import Market
 
 log = logging.getLogger("lagent.ai.gemini")
 
@@ -26,12 +27,16 @@ LIST_S = {"type": "ARRAY", "items": S}
 PAIRS = {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {"name": S, "value": S},
                                     "required": ["name", "value"]}}
 
-SYSTEM = (
-    "You are the listing writer for small online sellers in Pakistan. You write accurate, "
-    "persuasive product listings. Never invent specifications: state only what is visible in the "
-    "photos, written in the seller's notes, or given as research facts. Prices are in Pakistani "
-    "rupees (Rs.). Never put the price, discount or stock in listing text — the store shows those."
-)
+def system_for(m: Market) -> str:
+    return (
+        f"You are the listing writer for small online sellers in {m.country_name}. You write accurate, "
+        "persuasive product listings. Never invent specifications: state only what is visible in the "
+        "photos, written in the seller's notes, or given as research facts. Prices are in "
+        f"{m.currency} ({m.symbol}). Never put the price, discount or stock in listing text — the store shows those."
+    )
+
+
+SYSTEM = system_for(Market())   # Pakistan (the default market)
 
 PLATFORM_HINTS = {
     None: "a general online store",
@@ -83,7 +88,8 @@ class GeminiListingAI:
 
     # ---------------------------------------------------------------- 1. what is it?
 
-    async def analyze(self, image_urls, seller_notes, categories) -> ProductFacts:
+    async def analyze(self, image_urls, seller_notes, categories, market: Market | None = None) -> ProductFacts:
+        m = market or Market()
         photos = await load_photos(image_urls, self.catalog_url, outgoing_headers(self.internal_token))
         if not photos and not (seller_notes or "").strip():
             raise GeminiError("No usable photos or notes to work from.")
@@ -120,7 +126,7 @@ class GeminiListingAI:
         if seller_notes:
             prompt.append(f"\nSeller's notes:\n{seller_notes.strip()}")
         parts = [Part.text("\n".join(prompt))] + [Part.blob(p, "image/jpeg") for p in photos]
-        reply = await self.client.generate(parts, system=SYSTEM, schema=schema, temperature=0.2)
+        reply = await self.client.generate(parts, system=system_for(m), schema=schema, temperature=0.2)
         d = reply.json or {}
         suggested, is_new = _match_category(d.get("suggested_category"), categories)
         return ProductFacts(
@@ -136,14 +142,15 @@ class GeminiListingAI:
 
     # ---------------------------------------------------------------- 2. research
 
-    async def research(self, facts: ProductFacts) -> Research:
+    async def research(self, facts: ProductFacts, market: Market | None = None) -> Research:
+        m = market or Market()
         branded = bool(facts.brand)
         schema = {
             "type": "OBJECT",
             "properties": {
                 "facts": PAIRS, "buyer_priorities": LIST_S, "keywords": LIST_S,
-                "price_min_pkr": {"type": "NUMBER", "nullable": True},
-                "price_max_pkr": {"type": "NUMBER", "nullable": True},
+                "price_min": {"type": "NUMBER", "nullable": True},
+                "price_max": {"type": "NUMBER", "nullable": True},
             },
             "required": ["facts", "buyer_priorities", "keywords"],
         }
@@ -152,15 +159,17 @@ class GeminiListingAI:
             f"Product: {what}\nKnown attributes: {facts.attributes}\n\n"
             + ("It is a branded product: give its official specifications as facts (only ones you are sure of). "
                if branded else "It is a generic product: leave facts empty. ")
-            + "buyer_priorities: what shoppers in Pakistan care about most when buying this kind of product. "
-            "keywords: 5-10 phrases people type when searching for it (English, plus Roman Urdu if common). "
-            "price_min_pkr / price_max_pkr: typical selling price range in Pakistan in rupees, or null if unsure."
+            + f"buyer_priorities: what shoppers in {m.country_name} care about most when buying this kind of product. "
+            + ("keywords: 5-10 phrases people type when searching for it (English, plus Roman Urdu if common). "
+               if m.country == "PK" else
+               f"keywords: 5-10 phrases shoppers in {m.country_name} type when searching for it. ")
+            + f"price_min / price_max: typical selling price range in {m.country_name} in {m.currency}, or null if unsure."
         )
         mode = "specs" if branded else "category"
         reply = None
         if self.use_search:
             try:
-                reply = await self.client.generate([Part.text(prompt)], system=SYSTEM, schema=schema,
+                reply = await self.client.generate([Part.text(prompt)], system=system_for(m), schema=schema,
                                                    search=True, temperature=0.2)
             except GeminiError as exc:
                 # Search grounding isn't on the free tier (and some models don't allow search+JSON).
@@ -169,9 +178,9 @@ class GeminiListingAI:
                 else:
                     raise
         if reply is None:
-            reply = await self.client.generate([Part.text(prompt)], system=SYSTEM, schema=schema, temperature=0.2)
+            reply = await self.client.generate([Part.text(prompt)], system=system_for(m), schema=schema, temperature=0.2)
         d = reply.json or {}
-        lo, hi = d.get("price_min_pkr"), d.get("price_max_pkr")
+        lo, hi = d.get("price_min"), d.get("price_max")
         price_range = (float(lo), float(hi)) if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) \
             and 0 < lo <= hi else None
         return Research(
@@ -185,7 +194,9 @@ class GeminiListingAI:
 
     # ---------------------------------------------------------------- 3. write
 
-    async def write_listing(self, facts, research, seller_notes, language, platform, instruction=None) -> ListingDraft:
+    async def write_listing(self, facts, research, seller_notes, language, platform, instruction=None,
+                            market: Market | None = None) -> ListingDraft:
+        m = market or Market()
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -202,7 +213,8 @@ class GeminiListingAI:
                 "search words."
             )
         else:
-            lang_rules = "Write in clear, simple English that Pakistani shoppers read easily."
+            lang_rules = f"Write in clear, simple English that shoppers in {m.country_name} read easily" + (
+                "." if m.country in ("PK", "IN", "BD", "LK") else f", with {m.country_name}'s spelling and units.")
         lines = [
             f"Write a product listing for {PLATFORM_HINTS.get(platform, PLATFORM_HINTS[None])}.",
             lang_rules,
@@ -219,12 +231,12 @@ class GeminiListingAI:
             lines.append(f"Research: specs={research.facts}; buyers care about={research.buyer_priorities}; "
                          f"search keywords={research.keywords}")
         if seller_notes:
-            notes = re.sub(r"(?i)\b(price|rs\.?|pkr|discount|stock)\b[^\n.,]*", "", seller_notes).strip()
+            notes = re.sub(r"(?i)(\b(price|rs\.?|pkr|usd|gbp|eur|aed|sar|inr|discount|stock)\b|[$£€₹])[^\n.,]*", "", seller_notes).strip()
             if notes:
                 lines.append(f"Seller's notes (the seller's word is final): {notes}")
         if instruction:
             lines.append(f"Seller's change request: {instruction}")
-        reply = await self.client.generate([Part.text("\n".join(lines))], system=SYSTEM, schema=schema,
+        reply = await self.client.generate([Part.text("\n".join(lines))], system=system_for(m), schema=schema,
                                            temperature=0.7)
         d = reply.json or {}
         title = str(d.get("title") or "").strip()
@@ -243,8 +255,10 @@ class GeminiListingAI:
 
     # ---------------------------------------------------------------- 4. voice / typed commands
 
-    async def parse_command(self, text: str, stores: list[dict] | None = None) -> CommandResult:
+    async def parse_command(self, text: str, stores: list[dict] | None = None,
+                            market: Market | None = None) -> CommandResult:
         stores = stores or []
+        m = market or Market()
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -268,12 +282,12 @@ class GeminiListingAI:
             "(e.g. 'is ka price 2500 rakho', 'das percent discount', 'stock bees', 'free delivery'). "
             "Extract only what they actually said; everything else null. Numbers may be words in any "
             "of these languages (bees=20, das=10, pachees sau=2500, dhai hazar=2500). "
-            "price is in rupees. remove_discount=true only if they ask to remove the discount. "
+            f"price is in {m.currency}. remove_discount=true only if they ask to remove the discount. "
             "edit_instruction: a request to change the listing text (e.g. 'title chota karo'), in English.\n"
             "publish=true only if they ask to publish/upload/send/put the product on their store(s) "
             "(e.g. 'Shopify pe publish karo', 'sab stores pe daal do', 'upload to woo and smart click'). "
             "publish_to: the stores they named, copied from this list by name, or the platform word they used "
-            "(shopify / woocommerce / daraz / custom), or [\"all\"] for all/sab/everywhere/dono; [] if they didn't name any. "
+            "(shopify / woocommerce / daraz / ebay / custom), or [\"all\"] for all/sab/everywhere/dono; [] if they didn't name any. "
             "publish_mode: 'live' if they say live/visible/active/show it, 'draft' if they say draft/hidden; else null. "
             "publish_language: 'ur' if they want the Urdu listing, 'en' for English; else null.\n"
             f"The seller's stores: {store_list}\n\n"
@@ -312,7 +326,7 @@ class GeminiListingAI:
             r.stock = None
         parts = []
         if r.price is not None:
-            parts.append(f"price Rs. {r.price:,.0f}")
+            parts.append(f"price {m.money(r.price)}")
         if r.remove_discount:
             parts.append("no discount")
         elif r.discount_pct is not None:

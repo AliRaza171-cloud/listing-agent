@@ -85,6 +85,7 @@ PLATFORM_WORDS = {
     "woocommerce": {"woocommerce", "woo", "wordpress", "wp", "woo commerce"},
     "custom": {"custom", "custom store", "smart click", "smartclick", "my website", "website"},
     "daraz": {"daraz", "daraz pk", "daraz.pk"},
+    "ebay": {"ebay", "e bay"},
 }
 
 
@@ -144,9 +145,10 @@ def publish_summary(r: "CommandResult", stores: list[dict]) -> str:
 
 
 class ListingAI(Protocol):
-    async def analyze(self, image_urls: list[str], seller_notes: str | None, categories: list[str]) -> ProductFacts: ...
+    async def analyze(self, image_urls: list[str], seller_notes: str | None, categories: list[str],
+                      market=None) -> ProductFacts: ...
 
-    async def research(self, facts: ProductFacts) -> Research: ...
+    async def research(self, facts: ProductFacts, market=None) -> Research: ...   # market: lagent_common.markets.Market
 
     async def write_listing(
         self,
@@ -156,6 +158,7 @@ class ListingAI(Protocol):
         language: str,              # "en" | "ur"
         platform: str | None,       # None = generic, else "shopify" | "woocommerce" | "custom"
         instruction: str | None = None,
+        market=None,
     ) -> ListingDraft: ...
 
-    async def parse_command(self, text: str, stores: list[dict] | None = None) -> CommandResult: ...
+    async def parse_command(self, text: str, stores: list[dict] | None = None, market=None) -> CommandResult: ...

@@ -3,6 +3,8 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  myMarket,
+  type ConnectOptions,
   ApiError, connectStore, disconnectStore, getConnectOptions, getConnectRequest, listStores, startConnect, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
@@ -12,7 +14,7 @@ type Field = { key: string; label: string; placeholder: string; secret?: boolean
 
 // Manual (API key) forms. For Shopify and WooCommerce these sit under "Advanced" — most sellers
 // use the one-click Connect button instead.
-type KeyPlatform = Exclude<Platform, "daraz">;   // Daraz connects only through its own login
+type KeyPlatform = Exclude<Platform, "daraz" | "ebay">;   // Daraz and eBay connect only through their own login
 const FORMS: Record<KeyPlatform, {
   intro: string; urlLabel: string; urlPlaceholder: string; fields: Field[];
   ready?: (creds: Record<string, string>) => boolean;
@@ -85,7 +87,7 @@ function Stores() {
 
   const [stores, setStores] = useState<Store[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [oneClick, setOneClick] = useState<{ shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean } | null>(null);
+  const [oneClick, setOneClick] = useState<ConnectOptions | null>(null);
   const [result, setResult] = useState<{ kind: "ok" | "error" | "wait"; text: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -98,7 +100,7 @@ function Stores() {
 
   useEffect(() => {
     load();
-    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false, daraz: false }));
+    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false, daraz: false, ebay: false }));
   }, [load]);
 
   // Back from Shopify / WordPress: wait for the connection to be confirmed.
@@ -191,6 +193,7 @@ function Stores() {
         {(["woocommerce", "shopify", "daraz", "custom"] as const).map((p) => (
           <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load} />
         ))}
+        <EbayCard available={oneClick ? Boolean(oneClick.ebay) : null} marketplaces={oneClick?.ebay_marketplaces ?? []} />
       </div>
       <div className="note-dark">
         Your store’s access keys are encrypted as soon as they reach us and are never shown again — not even to you.
@@ -258,6 +261,69 @@ function OneClickCard({ platform, available, onConnected }: {
         </button>
       )}
       {showManual && keyPlatform && <ManualForm platform={keyPlatform} onConnected={onConnected} />}
+    </section>
+  );
+}
+
+function EbayCard({ available, marketplaces }: {
+  available: boolean | null; marketplaces: { id: string; name: string; currency: string }[];
+}) {
+  const mine = myMarket();
+  const [marketplace, setMarketplace] = useState("");
+  const [city, setCity] = useState("");
+  const [postal, setPostal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  // Start on the eBay site that sells in the seller's own currency, if there is one.
+  const site = marketplace || marketplaces.find((m) => m.currency === mine.currency)?.id || marketplaces[0]?.id || "";
+  const chosen = marketplaces.find((m) => m.id === site);
+
+  async function go(e: FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setBusy(true);
+    try {
+      const { authorize_url } = await startConnect("ebay", "", undefined, { marketplace: site, city: city.trim(), postal_code: postal.trim() });
+      window.location.href = authorize_url;
+    } catch (err) {
+      setMsg(err instanceof ApiError ? err.message : "Couldn't start the connection.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <div className="display">eBay</div>
+      {available === false ? (
+        <p className="small muted">
+          eBay connect works once Listing Agent is online and registered with eBay (developer.ebay.com). eBay has no API-key option.
+        </p>
+      ) : (
+        <form onSubmit={go} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p className="small muted">Pick your eBay site and where your items ship from, then log in to eBay and click Agree.</p>
+          <label className="field">eBay site
+            <select className="input" name="ebay-site" value={site} onChange={(e) => setMarketplace(e.target.value)}>
+              {marketplaces.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.currency})</option>)}
+            </select>
+          </label>
+          {chosen && chosen.currency !== mine.currency && (
+            <p className="small" style={{ color: "#B45309", margin: 0 }}>
+              {chosen.name} sells in {chosen.currency}; your products are priced in {mine.currency}. Change your market in Settings to list there.
+            </p>
+          )}
+          <div className="grid-2">
+            <label className="field">City<input className="input" name="ebay-city" value={city} autoComplete="off"
+              onChange={(e) => setCity(e.target.value)} placeholder="e.g. Manchester" /></label>
+            <label className="field">Postal code<input className="input" name="ebay-postal" value={postal} autoComplete="off"
+              onChange={(e) => setPostal(e.target.value)} placeholder="e.g. M1 1AA" /></label>
+          </div>
+          {msg && <div className="alert alert-error" role="alert">{msg}</div>}
+          <button className="btn btn-primary" disabled={busy || available === null || !site || !city.trim() || !postal.trim()}>
+            {busy && <span className="spinner" />}Connect eBay
+          </button>
+          <p className="small muted" style={{ margin: 0 }}>Before publishing, set up shipping and returns in eBay Seller Hub → Business policies.</p>
+        </form>
+      )}
     </section>
   );
 }

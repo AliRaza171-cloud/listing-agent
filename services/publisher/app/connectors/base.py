@@ -41,6 +41,7 @@ class ProductPayload:
     seo_title: str | None = None
     meta_description: str | None = None
     publish_live: bool = False     # False = create as draft (safe default)
+    currency: str = "PKR"          # the product's price currency (the seller's market)
     brand: str | None = None       # from what the AI saw in the photos
     attributes: dict = field(default_factory=dict)   # e.g. {"color": "black", "power": "2200W"} (AI-detected)
     # Package for delivery (Daraz requires these; WooCommerce uses them for shipping rates)

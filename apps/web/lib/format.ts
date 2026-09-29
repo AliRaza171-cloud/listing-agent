@@ -54,6 +54,7 @@ export const PLATFORM_NAMES: Record<string, string> = {
   woocommerce: "WooCommerce",
   custom: "Custom store",
   daraz: "Daraz",
+  ebay: "eBay",
 };
 
 export const REASON_NAMES: Record<string, string> = {

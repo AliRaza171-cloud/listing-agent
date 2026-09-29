@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from lagent_common.markets import Market
 from lagent_common.correlation import outgoing_headers
 from lagent_common.internal import current_user_id, require_internal
 
@@ -24,6 +25,9 @@ class ProductIn(BaseModel):
     image_urls: list[str] = Field(default_factory=list, max_length=8)
     seller_notes: str | None = None
     batch_id: uuid.UUID | None = None
+    # The seller's market (from their account). Prices of this product are in this currency.
+    country: str | None = Field(default=None, max_length=2)
+    currency: str | None = Field(default=None, max_length=3)
 
 
 class ProductPatch(BaseModel):
@@ -66,6 +70,7 @@ def _serialize(p: Product) -> dict:
         "seller_notes": p.seller_notes, "detected": p.detected, "research": p.research,
         "price": float(p.price) if p.price is not None else None, "discount_pct": p.discount_pct,
         "stock": p.stock, "sku": p.sku, "free_shipping": p.free_shipping, "last_error": p.last_error,
+        "country": p.country or "PK", "currency": p.currency or "PKR",
         **{k: (float(getattr(p, k)) if getattr(p, k) is not None else None) for k in ("weight_kg", "length_cm", "width_cm", "height_cm")},
         "images": [i.url for i in p.images],
         "listings": [{
@@ -116,7 +121,9 @@ def create_product(data: ProductIn, user_id: uuid.UUID = Depends(current_user_id
         batch = db.get(Batch, data.batch_id)
         if not batch or batch.user_id != user_id:
             raise HTTPException(404, "Batch not found.")
-    product = Product(user_id=user_id, seller_notes=data.seller_notes, batch_id=data.batch_id)
+    market = Market.of({"country": data.country, "currency": data.currency})
+    product = Product(user_id=user_id, seller_notes=data.seller_notes, batch_id=data.batch_id,
+                      country=market.country, currency=market.currency)
     product.images = [ProductImage(url=u, position=i) for i, u in enumerate(data.image_urls)]
     db.add(product)
     db.commit()
@@ -235,6 +242,7 @@ async def generate(product_id: uuid.UUID, data: GenerateIn,
         "reservation_id": reservation_id, "image_urls": [i.url for i in product.images],
         "seller_notes": product.seller_notes, "languages": data.languages, "platforms": data.platforms,
         "research": data.research, "categories": sorted(set(categories)),
+        "market": {"country": product.country or "PK", "currency": product.currency or "PKR"},
     })
     return {"job_id": str(job_id), "status": "generating"}
 
@@ -276,6 +284,7 @@ async def publish(product_id: uuid.UUID, data: PublishIn,
                 "category_name": generic.category_suggestion,
                 "seo_title": generic.seo_title, "meta_description": generic.meta_description,
                 "brand": (product.detected or {}).get("brand"),
+                "currency": product.currency or "PKR",
                 "attributes": (product.detected or {}).get("attributes") or {},
                 **{k: (float(getattr(product, k)) if getattr(product, k) is not None else None)
                    for k in ("weight_kg", "length_cm", "width_cm", "height_cm")},

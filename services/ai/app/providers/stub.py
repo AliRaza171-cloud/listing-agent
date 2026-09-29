@@ -6,12 +6,14 @@ provider by setting AI_PROVIDER in .env once that provider is implemented.
 """
 import re
 
+from lagent_common.markets import Market
+
 from app.providers.base import (ALL_WORDS, PLATFORM_WORDS, CommandResult, ListingDraft, ProductFacts, Research,
                                 confirmation, match_stores)
 
 
 class StubListingAI:
-    async def analyze(self, image_urls, seller_notes, categories):
+    async def analyze(self, image_urls, seller_notes, categories, market=None):
         return ProductFacts(
             product_type="sample product",
             attributes={"color": "silver"},
@@ -20,10 +22,10 @@ class StubListingAI:
             questions_for_seller=["What is the size or capacity?", "What material is it made of?"],
         )
 
-    async def research(self, facts):
+    async def research(self, facts, market=None):
         return Research(mode="skipped")
 
-    async def write_listing(self, facts, research, seller_notes, language, platform, instruction=None):
+    async def write_listing(self, facts, research, seller_notes, language, platform, instruction=None, market=None):
         name = facts.product_type.title()
         if language == "ur":
             return ListingDraft(title=f"{name} (نمونہ)", highlights=["پائیدار", "صاف کرنے میں آسان"],
@@ -37,13 +39,14 @@ class StubListingAI:
             category_suggestion=facts.suggested_category,
         )
 
-    async def parse_command(self, text, stores=None):
+    async def parse_command(self, text, stores=None, market=None):
         stores = stores or []
+        mk = market or Market()
         # Tiny rule-based parser so voice/typed commands can be tested offline.
         # The real provider handles Urdu / Roman Urdu / mixed phrasing properly.
         t = text.lower()
         result = CommandResult()
-        if m := re.search(r"price\s*(?:is|to|=)?\s*(?:rs\.?\s*)?(\d[\d,]*)", t):
+        if m := re.search(r"price\s*(?:is|to|=)?\s*(?:rs\.?|\$|£|€|usd|gbp|eur)?\s*(\d[\d,]*)", t):
             result.price = float(m.group(1).replace(",", ""))
         if m := re.search(r"(\d{1,2})\s*(?:%|percent)", t):
             result.discount_pct = int(m.group(1))
@@ -53,7 +56,7 @@ class StubListingAI:
             result.free_shipping = True
         parts = []
         if result.price is not None:
-            parts.append(f"price Rs. {result.price:,.0f}")
+            parts.append(f"price {mk.money(result.price)}")
         if result.discount_pct is not None:
             parts.append(f"{result.discount_pct}% off")
         if result.stock is not None:

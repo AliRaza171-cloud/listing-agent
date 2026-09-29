@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,11 +21,11 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from sqlalchemy import Column, DateTime, Enum, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
-from lagent_common import daraz
+from lagent_common import daraz, ebay
 from lagent_common.correlation import outgoing_headers
 from lagent_common.db import make_db
 from lagent_common.internal import current_user_id, require_internal
@@ -59,6 +60,16 @@ class Settings(BaseSettings):
     DARAZ_API_URL: str = daraz.API_URL
     DARAZ_AUTH_URL: str = daraz.AUTH_URL
     DARAZ_AUTH_PAGE: str = daraz.AUTH_PAGE
+    # Listing Agent's eBay app (developer.ebay.com → Application keys, Production). The RuName is the name
+    # eBay gives the "accept" redirect URL (User Tokens → Get a Token from eBay via Your Application).
+    EBAY_CLIENT_ID: str = ""
+    EBAY_CLIENT_SECRET: str = ""
+    EBAY_RU_NAME: str = ""
+    # Marketplace account deletion notifications (required by eBay for production keys)
+    EBAY_VERIFICATION_TOKEN: str = ""
+    EBAY_API_URL: str = ebay.API
+    EBAY_AUTH_URL: str = ebay.AUTH
+    EBAY_IDENTITY_URL: str = ebay.APIZ
 
     @property
     def api_base(self) -> str:
@@ -91,7 +102,7 @@ class StoreConnection(Base):
     __table_args__ = (UniqueConstraint("user_id", "platform", "store_url"),)
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), nullable=False)
-    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", name="store_platform", create_type=False), nullable=False)
+    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", "ebay", name="store_platform", create_type=False), nullable=False)
     name = Column(String, nullable=False)
     store_url = Column(String, nullable=False)
     credentials_encrypted = Column(String, nullable=False)
@@ -106,12 +117,13 @@ class ConnectRequest(Base):
     __tablename__ = "connect_requests"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), nullable=False)
-    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", name="store_platform", create_type=False), nullable=False)
+    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", "ebay", name="store_platform", create_type=False), nullable=False)
     name = Column(String, nullable=False)
     store_url = Column(String, nullable=False)
     status = Column(String, default="pending", nullable=False)
     error = Column(String)
     store_id = Column(UUID(as_uuid=True))
+    extra = Column(JSONB)          # e.g. eBay: {"marketplace", "city", "postal_code"}
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -203,6 +215,10 @@ SHOP_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$")
 class StartIn(BaseModel):
     store: str = Field(default="", max_length=300)   # WooCommerce site address or Shopify store name (not used for Daraz)
     name: str | None = Field(default=None, max_length=80)
+    # eBay only: which eBay site, and where items ship from (eBay requires an item location)
+    marketplace: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=80)
+    postal_code: str | None = Field(default=None, max_length=20)
 
 
 def _new_request(db: Session, user_id, platform: str, name: str, store_url: str) -> ConnectRequest:
@@ -259,7 +275,9 @@ def connect_options():
     online = settings.api_base.lower().startswith("https://")
     return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET) and online,
             "woocommerce": online, "custom": True,
-            "daraz": bool(settings.DARAZ_APP_KEY and settings.DARAZ_APP_SECRET) and online}
+            "daraz": bool(settings.DARAZ_APP_KEY and settings.DARAZ_APP_SECRET) and online,
+            "ebay": bool(settings.EBAY_CLIENT_ID and settings.EBAY_CLIENT_SECRET and settings.EBAY_RU_NAME) and online,
+            "ebay_marketplaces": [{"id": m.id, "name": m.name, "currency": m.currency} for m in ebay.MARKETPLACES.values()]}
 
 
 def _reachable(url: str) -> str:
@@ -495,7 +513,7 @@ async def _fresh_daraz_credentials(db: Session, store: StoreConnection) -> dict:
     DARAZ_RENEW_DAYS remain, and save the new pair. When the refresh token is gone too, the
     seller has to press Connect again."""
     creds = decrypt_credentials(store.credentials_encrypted)
-    now = int(datetime.utcnow().timestamp())
+    now = int(time.time())
     if int(creds.get("expires_at") or 0) - now > DARAZ_RENEW_DAYS * 86400:
         return creds
     if int(creds.get("refresh_expires_at") or 0) <= now:
@@ -516,6 +534,132 @@ async def _fresh_daraz_credentials(db: Session, store: StoreConnection) -> dict:
     db.commit()
     log.info("renewed Daraz access for store %s", store.id)
     return new
+
+
+# ---------------------------------------------------------------- eBay
+
+def _ebay() -> ebay.EbayAuth:
+    return ebay.EbayAuth(settings.EBAY_CLIENT_ID, settings.EBAY_CLIENT_SECRET, settings.EBAY_RU_NAME,
+                         api=settings.EBAY_API_URL, http=_http)
+
+
+@router.post("/connect/ebay")
+def start_ebay(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    """eBay seller login. The seller picks the eBay site and where items ship from, then signs in to eBay."""
+    if not (settings.EBAY_CLIENT_ID and settings.EBAY_CLIENT_SECRET and settings.EBAY_RU_NAME):
+        raise HTTPException(503, "eBay connections aren't set up on this server yet.")
+    m = ebay.MARKETPLACES.get((data.marketplace or "").upper())
+    if not m:
+        raise HTTPException(422, "Pick your eBay site.")
+    city, postal = (data.city or "").strip(), (data.postal_code or "").strip()
+    if not city or not postal:
+        raise HTTPException(422, "Enter the city and postal code your items ship from — eBay shows it to buyers.")
+    req = _new_request(db, user_id, "ebay", (data.name or "").strip() or m.name, m.site)
+    req.extra = {"marketplace": m.id, "city": city, "postal_code": postal}
+    db.commit()
+    return {"request_id": str(req.id),
+            "authorize_url": ebay.authorize_url(settings.EBAY_CLIENT_ID, settings.EBAY_RU_NAME, str(req.id),
+                                                settings.EBAY_AUTH_URL)}
+
+
+@router.get("/connect/ebay/callback")
+async def ebay_callback(request: Request, db: Session = Depends(get_db)):
+    """Public (eBay sends the seller's browser here: the RuName's "accept" and "decline" URLs)."""
+    params = dict(request.query_params)
+    app_url = settings.APP_URL.rstrip("/")
+    req = _open_request(db, params.get("state", ""), "ebay")
+    if req is None:
+        return RedirectResponse(f"{app_url}/stores?connect_error=expired", status_code=303)
+    back = f"{app_url}/stores?connect={req.id}"
+    if not params.get("code"):
+        _finish(db, req, error="The connection was cancelled in eBay.")
+        return RedirectResponse(back + "&denied=1", status_code=303)
+    auth = _ebay()
+    try:
+        tokens = await auth.create_token(params["code"])
+        r = await _http.get(f"{settings.EBAY_IDENTITY_URL}/commerce/identity/v1/user/",
+                            headers={"Authorization": f"Bearer {tokens.access_token}"})
+        who = r.json() if r.status_code == 200 else {}
+    except (ebay.EbayError, httpx.HTTPError, ValueError) as exc:
+        _finish(db, req, error=f"eBay didn't give access: {exc}")
+        return RedirectResponse(back, status_code=303)
+    extra = req.extra or {}
+    m = ebay.MARKETPLACES[extra.get("marketplace", "EBAY_US")]
+    username = str(who.get("username") or "")
+    creds = {"access_token": tokens.access_token, "refresh_token": tokens.refresh_token,
+             "expires_at": str(tokens.expires_at), "refresh_expires_at": str(tokens.refresh_expires_at),
+             "marketplace": m.id, "user_id": str(who.get("userId") or ""), "username": username,
+             "city": extra.get("city", ""), "postal_code": extra.get("postal_code", "")}
+    store_url = f"{m.site}/usr/{username}" if username else m.site
+    name = req.name if req.name != m.name else (f"{username} ({m.name})" if username else m.name)
+    try:
+        await _test("ebay", store_url, creds)
+    except ConnectionFailed as exc:
+        _finish(db, req, error=str(exc))
+        return RedirectResponse(back, status_code=303)
+    _finish(db, req, store=_save(db, req.user_id, "ebay", name, store_url, creds, replace=True))
+    return RedirectResponse(back, status_code=303)
+
+
+async def _fresh_ebay_credentials(db: Session, store: StoreConnection) -> dict:
+    """eBay access lasts 2 hours: renew it with the (18-month) refresh token when under 10 minutes remain."""
+    creds = decrypt_credentials(store.credentials_encrypted)
+    now = int(time.time())
+    if int(creds.get("expires_at") or 0) - now > 600:
+        return creds
+    if int(creds.get("refresh_expires_at") or 0) <= now:
+        store.status, store.last_error = "error", "eBay access expired — press Connect on eBay again."
+        db.commit()
+        raise HTTPException(409, store.last_error)
+    try:
+        token, expires_at = await _ebay().refresh(creds.get("refresh_token", ""))
+    except ebay.EbayError as exc:
+        if exc.retryable:
+            raise HTTPException(503, "eBay isn't answering right now — try again in a minute.")
+        store.status, store.last_error = "error", "eBay access expired — press Connect on eBay again."
+        db.commit()
+        raise HTTPException(409, store.last_error)
+    creds.update(access_token=token, expires_at=str(expires_at))
+    store.credentials_encrypted = encrypt_credentials(creds)
+    store.status, store.last_error = "active", None
+    db.commit()
+    return creds
+
+
+def ebay_challenge_response(challenge_code: str, verification_token: str, endpoint: str) -> str:
+    """eBay checks the deletion endpoint with SHA-256(challengeCode + verificationToken + endpoint), hex."""
+    return hashlib.sha256((challenge_code + verification_token + endpoint).encode()).hexdigest()
+
+
+@router.get("/ebay/account-deletion")
+def ebay_deletion_check(challenge_code: str = Query(...)):
+    """Public. eBay's one-time check that this endpoint belongs to us (set in the developer portal)."""
+    if not settings.EBAY_VERIFICATION_TOKEN:
+        raise HTTPException(503, "Not configured.")
+    endpoint = f"{settings.api_base}/api/store/ebay/account-deletion"
+    return {"challengeResponse": ebay_challenge_response(challenge_code, settings.EBAY_VERIFICATION_TOKEN, endpoint)}
+
+
+@router.post("/ebay/account-deletion")
+async def ebay_account_deleted(request: Request, db: Session = Depends(get_db)):
+    """Public. An eBay member closed their account: forget their eBay connection(s).
+    (Anyone can only ever cause a disconnect here, which the seller can undo by connecting again.)"""
+    try:
+        body = await request.json()
+    except ValueError:
+        return {"ok": True}
+    data = ((body or {}).get("notification") or {}).get("data") or {}
+    username, user_ref = str(data.get("username") or ""), str(data.get("userId") or "")
+    removed = 0
+    if username or user_ref:
+        for store in db.query(StoreConnection).filter_by(platform="ebay").all():
+            if (username and store.store_url.endswith(f"/usr/{username}")) or \
+                    (user_ref and decrypt_credentials(store.credentials_encrypted).get("user_id") == user_ref):
+                db.delete(store)
+                removed += 1
+        db.commit()
+    log.info("eBay account deletion: removed %d connection(s)", removed)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- Shopify webhooks
@@ -599,8 +743,12 @@ async def credentials_for_publisher(store_id: uuid.UUID, user_id: uuid.UUID = Qu
         raise HTTPException(404, "Store not found.")
     if store.status == "disconnected":
         raise HTTPException(409, "Store is disconnected.")
-    creds = (await _fresh_daraz_credentials(db, store) if store.platform == "daraz"
-             else decrypt_credentials(store.credentials_encrypted))
+    if store.platform == "daraz":
+        creds = await _fresh_daraz_credentials(db, store)
+    elif store.platform == "ebay":
+        creds = await _fresh_ebay_credentials(db, store)
+    else:
+        creds = decrypt_credentials(store.credentials_encrypted)
     return {"platform": store.platform, "store_url": store.store_url, "credentials": creds}
 
 

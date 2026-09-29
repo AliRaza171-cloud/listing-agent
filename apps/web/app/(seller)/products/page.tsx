@@ -7,7 +7,8 @@ import { PlusIcon, SearchIcon } from "@/components/Icons";
 import StatusBadge from "@/components/StatusBadge";
 import { usePolling } from "@/lib/hooks";
 import { ApiError, listBatches, listProducts, listStores, mediaUrl, type Batch, type Product, type Store } from "@/lib/api";
-import { displayStatus, finalPrice, PLATFORM_NAMES, productTitle, rs, timeAgo, type Display } from "@/lib/format";
+import { displayStatus, finalPrice, PLATFORM_NAMES, productTitle, timeAgo, type Display } from "@/lib/format";
+import { money } from "@/lib/markets";
 
 const FILTERS: { key: "all" | Display["key"]; label: string }[] = [
   { key: "all", label: "All" },
@@ -168,7 +169,7 @@ function Products() {
           const failedPub = p.publications.find((x) => x.status === "failed");
           const sub = p.status === "failed" ? (p.last_error || "Try generating again.")
             : failedPub ? `${storeName(failedPub.store_connection_id)}: ${failedPub.error || "publish failed"}`
-            : [p.listings[0]?.category_suggestion, price !== null ? rs(price) : null].filter(Boolean).join(" · ")
+            : [p.listings[0]?.category_suggestion, price !== null ? money(price, p.currency) : null].filter(Boolean).join(" · ")
               || (p.detected?.questions_for_seller?.length ? `${p.detected.questions_for_seller.length} questions for you` : "");
           return (
             <Link key={p.id} href={`/products/${p.id}`} className={`row${d.key === "attention" ? " warn" : ""}`}>

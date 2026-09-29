@@ -54,6 +54,8 @@ class Product(Base):
     stock = Column(Integer)
     sku = Column(String)
     free_shipping = Column(Boolean, default=False, nullable=False)
+    country = Column(String(2), default="PK", nullable=False)     # market: prices in `currency`,
+    currency = Column(String(3), default="PKR", nullable=False)   # AI writes/researches for `country`
     weight_kg = Column(Numeric(8, 3))
     length_cm = Column(Numeric(8, 1))
     width_cm = Column(Numeric(8, 1))

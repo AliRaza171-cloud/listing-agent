@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
+from lagent_common.markets import Market
 from lagent_common.bus import EventBus
 from lagent_common.internal import current_user_id, require_internal
 from lagent_common.service import create_service
@@ -44,12 +45,13 @@ ai = get_listing_ai(settings)
 
 
 async def run_pipeline(data: dict) -> dict:
-    facts = await ai.analyze(data["image_urls"], data.get("seller_notes"), data.get("categories") or [])
-    research = await ai.research(facts) if data.get("research") else None
+    market = Market.of(data.get("market"))   # older events without it = Pakistan
+    facts = await ai.analyze(data["image_urls"], data.get("seller_notes"), data.get("categories") or [], market)
+    research = await ai.research(facts, market) if data.get("research") else None
     listings = []
     for language in data["languages"]:
         for platform in (data["platforms"] or [None]):
-            draft = await ai.write_listing(facts, research, data.get("seller_notes"), language, platform)
+            draft = await ai.write_listing(facts, research, data.get("seller_notes"), language, platform, market=market)
             listings.append({"language": language, "platform": platform, **asdict(draft)})
     return {
         "facts": asdict(facts),
@@ -88,6 +90,7 @@ class StoreRef(BaseModel):
 class CommandIn(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
     stores: list[StoreRef] = Field(default_factory=list, max_length=50)   # the seller's connected stores
+    market: dict | None = None     # {"country", "currency"} of the product (prices are in this currency)
 
 
 router = APIRouter(dependencies=[Depends(require_internal)])
@@ -98,12 +101,13 @@ async def parse_command(data: CommandIn, _user=Depends(current_user_id)):
     """Voice/typed command -> structured fields. The UI shows confirmation_text and
     saves nothing until the seller confirms."""
     try:
-        return asdict(await ai.parse_command(data.text, [st.model_dump() for st in data.stores]))
+        return asdict(await ai.parse_command(data.text, [st.model_dump() for st in data.stores], Market.of(data.market)))
     except GeminiError as exc:
         # The AI is unavailable (rate limit, no key...): fall back to the simple offline parser,
         # which handles "price 2500, 10% off, stock 20" style commands.
         log.warning("command parsing fell back to rules: %s", exc)
-        return asdict(await StubListingAI().parse_command(data.text, [st.model_dump() for st in data.stores]))
+        return asdict(await StubListingAI().parse_command(data.text, [st.model_dump() for st in data.stores],
+                                                          Market.of(data.market)))
 
 
 app = create_service("ai", routers=[router], bus=bus)

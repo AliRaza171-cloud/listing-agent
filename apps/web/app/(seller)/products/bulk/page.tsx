@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { CloseIcon, SparkIcon, UploadIcon } from "@/components/Icons";
 import { ModeSwitch } from "@/components/ModeSwitch";
 import { useSession } from "@/lib/session";
-import {
+import { myMarket,
   ApiError, createBatch, createProduct, deleteProduct, generateListing, listStores, mediaUrl, uploadPhoto, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
@@ -28,7 +28,8 @@ export default function BulkPage() {
 
   const [items, setItems] = useState<Item[]>([]);
   const [name, setName] = useState(() => `Batch ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`);
-  const [langs, setLangs] = useState({ en: true, ur: true });
+  // Urdu is ticked by default for sellers in Pakistan only.
+  const [langs, setLangs] = useState(() => ({ en: true, ur: myMarket().country === "PK" }));
   const [stores, setStores] = useState<Store[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [research, setResearch] = useState(false);

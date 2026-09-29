@@ -7,7 +7,7 @@ import { CloseIcon, MicIcon, SparkIcon, StopIcon, UploadIcon } from "@/component
 import { ModeSwitch } from "@/components/ModeSwitch";
 import { useRecorder } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
-import {
+import { myMarket,
   ApiError, createProduct, generateListing, listStores, mediaUrl, transcribe, uploadPhoto, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
@@ -25,7 +25,8 @@ export default function NewListingPage() {
 
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [notes, setNotes] = useState("");
-  const [langs, setLangs] = useState({ en: true, ur: true });
+  // Urdu is ticked by default for sellers in Pakistan only.
+  const [langs, setLangs] = useState(() => ({ en: true, ur: myMarket().country === "PK" }));
   const [stores, setStores] = useState<Store[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [research, setResearch] = useState(true);

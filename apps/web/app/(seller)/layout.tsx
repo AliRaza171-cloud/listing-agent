@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { CoinIcon, CloseIcon, GridIcon, LogoMark, LogoutIcon, MenuIcon, PlusIcon, StoreIcon } from "@/components/Icons";
+import { CoinIcon, GearIcon, CloseIcon, GridIcon, LogoMark, LogoutIcon, MenuIcon, PlusIcon, StoreIcon } from "@/components/Icons";
 import { clearSession, getCredits, getSession, type User } from "@/lib/api";
 import { SessionContext } from "@/lib/session";
 
@@ -12,6 +12,7 @@ const NAV = [
   { href: "/products/new", label: "New listing", icon: PlusIcon, match: (p: string) => p === "/products/new" || p === "/products/bulk" },
   { href: "/stores", label: "Stores", icon: StoreIcon, match: (p: string) => p.startsWith("/stores") },
   { href: "/credits", label: "Credits", icon: CoinIcon, match: (p: string) => p.startsWith("/credits") },
+  { href: "/settings", label: "Settings", icon: GearIcon, match: (p: string) => p.startsWith("/settings") },
 ];
 
 export default function SellerLayout({ children }: { children: ReactNode }) {

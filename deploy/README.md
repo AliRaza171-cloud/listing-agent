@@ -126,6 +126,23 @@ Then open your Vercel site, sign up, and you're live.
 5. Daraz needs a **package weight and size** on each product (Your details) and checks new products (QC)
    before they show in the shop.
 
+## 5d. eBay (US, UK, Canada, Australia)
+
+1. Free account at **developer.ebay.com** → **Application Keys** → create a **Production** keyset.
+2. **Alerts & Notifications → Marketplace account deletion** (eBay requires this before the keys work):
+   - Endpoint: `https://listingagent.duckdns.org/api/store/ebay/account-deletion`
+   - Verification token: 32–80 letters/digits you make up → also put it in `.env` as `EBAY_VERIFICATION_TOKEN`
+     and run `bash deploy/update.sh` *before* pressing Save (eBay checks the endpoint immediately).
+3. **User Tokens → Get a Token from eBay via Your Application → Add eBay Redirect URL**:
+   - Your privacy policy URL: `https://<your-vercel-site>/privacy`
+   - Auth accepted URL and Auth declined URL: `https://listingagent.duckdns.org/api/store/connect/ebay/callback`
+   - eBay shows a **RuName** (e.g. `Ali_Raza-ListingA-PRD-…`) → `EBAY_RU_NAME` in `.env`.
+4. `.env`: `EBAY_CLIENT_ID` (App ID), `EBAY_CLIENT_SECRET` (Cert ID), `EBAY_RU_NAME`, `EBAY_VERIFICATION_TOKEN`,
+   then `bash deploy/update.sh`.
+5. Sellers pick their eBay site + item location on the Stores page and log in. Before publishing they need
+   **Business policies** (shipping + returns) in eBay Seller Hub. Product prices must be in that site's
+   currency (Settings → where you sell).
+
 ## 6. Backups (once)
 
 ```bash

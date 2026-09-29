@@ -11,7 +11,8 @@ import {
   ApiError, deleteProduct, generateListing, getProduct, listStores, mediaUrl, parseCommand, publishProduct,
   transcribe, updateListing, updateProduct, type CommandResult, type Listing, type Product, type Store,
 } from "@/lib/api";
-import { displayStatus, finalPrice, PLATFORM_NAMES, productTitle, rs } from "@/lib/format";
+import { displayStatus, finalPrice, PLATFORM_NAMES, productTitle } from "@/lib/format";
+import { currencySymbol, money } from "@/lib/markets";
 
 const TITLE_LIMIT = 70;
 const errText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
@@ -453,11 +454,11 @@ function ListingForm({ product, listing, onSaved, onNotice }: {
 
 function describe(r: CommandResult, p: Product, stores: Store[]): string | null {
   const parts: string[] = [];
-  if (r.price !== null) parts.push(`price ${rs(r.price)}`);
+  if (r.price !== null) parts.push(`price ${money(r.price, p.currency)}`);
   if (r.remove_discount) parts.push("no discount");
   else if (r.discount_pct !== null) {
     const base = r.price ?? p.price;
-    parts.push(`${r.discount_pct}% off${base !== null ? ` (${rs(base * (1 - r.discount_pct / 100))})` : ""}`);
+    parts.push(`${r.discount_pct}% off${base !== null ? ` (${money(base * (1 - r.discount_pct / 100), p.currency)})` : ""}`);
   }
   if (r.stock !== null) parts.push(`stock ${r.stock}`);
   if (r.sku) parts.push(`SKU ${r.sku}`);
@@ -492,7 +493,8 @@ function VoiceCard({ product, stores, onSaved, onPublished, onNotice }: {
     setResult(null);
     setWorking(true);
     try {
-      setResult(await parseCommand(text, stores.filter((s) => s.status === "active")));
+      setResult(await parseCommand(text, stores.filter((s) => s.status === "active"),
+        { country: product.country, currency: product.currency }));
     } catch (e) {
       onNotice({ kind: "error", text: errText(e, "Couldn't understand that.") });
       setHeard(null);
@@ -644,10 +646,10 @@ function DetailsCard({ product, onSaved, onNotice }: { product: Product; onSaved
     <section className="card">
       <div className="card-head">
         <h2>Your details</h2>
-        {final !== null && product.discount_pct ? <span className="small muted">Sells at <b style={{ color: "var(--ink)" }}>{rs(final)}</b></span> : null}
+        {final !== null && product.discount_pct ? <span className="small muted">Sells at <b style={{ color: "var(--ink)" }}>{money(final, product.currency)}</b></span> : null}
       </div>
       <div className="grid-2">
-        <label className="field">Price (Rs.)<input className="input" inputMode="decimal" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></label>
+        <label className="field">Price ({currencySymbol(product.currency)})<input className="input" inputMode="decimal" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></label>
         <label className="field">Discount %<input className="input" inputMode="numeric" value={form.discount} onChange={(e) => setForm({ ...form, discount: e.target.value })} /></label>
         <label className="field">Stock<input className="input" inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></label>
         <label className="field">SKU<input className="input" placeholder="Optional" value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} /></label>
@@ -673,7 +675,7 @@ function ResearchCard({ product }: { product: Product }) {
     <section className="card">
       <h2>Research</h2>
       {r.price_range && (
-        <p className="small">Similar items sell for about <b>{rs(r.price_range[0])} – {rs(r.price_range[1])}</b> — a suggestion only.</p>
+        <p className="small">Similar items sell for about <b>{money(r.price_range[0], product.currency)} – {money(r.price_range[1], product.currency)}</b> — a suggestion only.</p>
       )}
       {r.buyer_priorities && r.buyer_priorities.length > 0 && (
         <p className="small">Buyers look for {r.buyer_priorities.join(", ")}.</p>

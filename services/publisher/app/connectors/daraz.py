@@ -215,6 +215,9 @@ class DarazConnector:
     # ---------------------------------------------------------------- publish
 
     async def _publish(self, external_id: str | None, p: ProductPayload) -> PublishResult:
+        if (p.currency or "PKR").upper() != "PKR":
+            raise ConnectorError(f"Daraz sells in Pakistani rupees, but this product is priced in {p.currency}. "
+                                 "Products for Daraz need a Pakistan (PKR) price — see Settings.")
         missing_pkg = [n for n, v in (("weight", p.weight_kg), ("length", p.length_cm), ("width", p.width_cm),
                                       ("height", p.height_cm)) if not v]
         if missing_pkg:

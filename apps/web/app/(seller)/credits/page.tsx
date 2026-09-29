@@ -30,7 +30,8 @@ function CreditsInner() {
   const cancelled = params.get("cancelled") === "1";
   const returnFailed = params.get("failed") === "1";
 
-  const { refreshCredits } = useSession();
+  const { refreshCredits, user } = useSession();
+  const inPakistan = (user.country || "PK") === "PK";   // Safepay (JazzCash, EasyPaisa) is for Pakistan
   const [data, setData] = useState<Credits | null>(null);
   const [shop, setShop] = useState<PacksInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -142,14 +143,14 @@ function CreditsInner() {
                 <span className="pack-name">{pack.name}{i === 1 && shop.packs.length > 2 && <span className="pack-tag">Most popular</span>}</span>
                 <span className="pack-credits">{pack.credits.toLocaleString("en-US")} <span>credits</span></span>
                 <span className="pack-price">
-                  {pkr !== undefined ? money(pkr, "PKR") : other !== undefined ? money(other, stripeCur) : "—"}
-                  {pkr !== undefined && other !== undefined && stripeCur !== "PKR" && (
+                  {pkr !== undefined && inPakistan ? money(pkr, "PKR") : other !== undefined ? money(other, stripeCur) : pkr !== undefined ? money(pkr, "PKR") : "—"}
+                  {inPakistan && pkr !== undefined && other !== undefined && stripeCur !== "PKR" && (
                     <span className="small muted"> · {money(other, stripeCur)}</span>
                   )}
                 </span>
-                {perCredit !== null && <span className="small muted">Rs {perCredit.toFixed(perCredit < 10 ? 1 : 0)} per listing</span>}
+                {perCredit !== null && inPakistan && <span className="small muted">Rs {perCredit.toFixed(perCredit < 10 ? 1 : 0)} per listing</span>}
                 <div className="pack-actions">
-                  {providers?.safepay && pkr !== undefined && (
+                  {providers?.safepay && inPakistan && pkr !== undefined && (
                     <button type="button" className="btn btn-primary btn-block" disabled={busy !== null}
                       onClick={() => buy(pack, "safepay")}>
                       {busy === `${pack.id}:safepay` ? <span className="spinner" /> : null}
@@ -157,7 +158,7 @@ function CreditsInner() {
                     </button>
                   )}
                   {providers?.stripe && other !== undefined && (
-                    <button type="button" className={`btn btn-block ${providers.safepay ? "btn-ghost" : "btn-primary"}`}
+                    <button type="button" className={`btn btn-block ${providers.safepay && inPakistan ? "btn-ghost" : "btn-primary"}`}
                       disabled={busy !== null} onClick={() => buy(pack, "stripe")}>
                       {busy === `${pack.id}:stripe` ? <span className="spinner" /> : null}
                       International card ({stripeCur})

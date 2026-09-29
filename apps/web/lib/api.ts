@@ -4,7 +4,10 @@ export const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:810
 
 const TOKEN_KEY = "la_session";
 
-export type User = { id: string; email: string; full_name: string | null };
+export type User = {
+  id: string; email: string; full_name: string | null;
+  country?: string; currency?: string;   // where the seller sells (older sessions: Pakistan / PKR)
+};
 type Session = { token: string; expiresAt: number; user: User };
 
 export type Listing = {
@@ -61,6 +64,8 @@ export type Product = {
   stock: number | null;
   sku: string | null;
   free_shipping: boolean;
+  country?: string;              // the product's market; price is in `currency`
+  currency?: string;
   weight_kg?: number | null;     // package for delivery (Daraz requires it)
   length_cm?: number | null;
   width_cm?: number | null;
@@ -74,7 +79,7 @@ export type Product = {
 
 export type Store = {
   id: string;
-  platform: "shopify" | "woocommerce" | "custom" | "daraz";
+  platform: "shopify" | "woocommerce" | "custom" | "daraz" | "ebay";
   name: string;
   store_url: string;
   status: "active" | "error" | "disconnected";
@@ -219,9 +224,9 @@ export function mediaUrl(url: string): string {
 
 type TokenResponse = { access_token: string; expires_in: number; user: User };
 
-export async function register(email: string, password: string, full_name?: string): Promise<User> {
+export async function register(email: string, password: string, full_name?: string, country?: string): Promise<User> {
   const res = await api<TokenResponse>("auth/register", {
-    method: "POST", json: { email, password, full_name: full_name || null }, auth: false,
+    method: "POST", json: { email, password, full_name: full_name || null, country: country || null }, auth: false,
   });
   return saveSession(res);
 }
@@ -232,6 +237,22 @@ export async function login(email: string, password: string): Promise<User> {
 }
 
 export const getMe = () => api<User>("auth/me");
+
+/** Settings: name and market. Keeps the saved session's copy of the user in step. */
+export async function updateMe(patch: { full_name?: string | null; country?: string; currency?: string }): Promise<User> {
+  const user = await api<User>("auth/me", { method: "PATCH", json: patch });
+  const s = getSession();
+  if (s && typeof window !== "undefined") {
+    try { window.localStorage.setItem(TOKEN_KEY, JSON.stringify({ ...s, user })); } catch { /* ignore */ }
+  }
+  return user;
+}
+
+/** The signed-in seller's market (from the saved session). */
+export function myMarket(): { country: string; currency: string } {
+  const u = getSession()?.user;
+  return { country: u?.country || "PK", currency: u?.currency || "PKR" };
+}
 export const getCredits = () => api<Credits>("billing/credits");
 
 export type Pack = { id: string; name: string; credits: number; prices: Record<string, number> };
@@ -248,7 +269,9 @@ export const getPayment = (id: string) => api<Payment>(`billing/payments/${id}`)
 export const listProducts = () => api<Product[]>("catalog/products");
 export const getProduct = (id: string) => api<Product>(`catalog/products/${id}`);
 export const createProduct = (image_urls: string[], seller_notes: string | null, batch_id?: string) =>
-  api<Product>("catalog/products", { method: "POST", json: { image_urls, seller_notes, batch_id: batch_id ?? null } });
+  api<Product>("catalog/products", {
+    method: "POST", json: { image_urls, seller_notes, batch_id: batch_id ?? null, ...myMarket() },
+  });
 
 export type Batch = {
   id: string; name: string; created_at: string;
@@ -291,10 +314,15 @@ export type ConnectRequest = {
   id: string; platform: Store["platform"]; status: "pending" | "connected" | "failed";
   error: string | null; store_url: string; name: string;
 };
-export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean }>("store/connect/options");
-export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "daraz", store: string, name?: string) =>
+export type ConnectOptions = {
+  shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean; ebay?: boolean;
+  ebay_marketplaces?: { id: string; name: string; currency: string }[];
+};
+export const getConnectOptions = () => api<ConnectOptions>("store/connect/options");
+export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "daraz" | "ebay", store: string, name?: string,
+  extra?: { marketplace?: string; city?: string; postal_code?: string }) =>
   api<{ request_id: string; authorize_url: string }>(`store/connect/${platform}`, {
-    method: "POST", json: { store, name: name || null },
+    method: "POST", json: { store, name: name || null, ...(extra ?? {}) },
   });
 export const getConnectRequest = (id: string) => api<ConnectRequest>(`store/connect/requests/${id}`);
 
@@ -304,10 +332,13 @@ export async function transcribe(audio: Blob): Promise<{ text: string; language:
   const ext = type.split("/")[1] || "webm";
   const form = new FormData();
   form.append("audio", new Blob([audio], { type }), `recording.${ext}`);
+  form.append("country", myMarket().country);
   return api("voice/transcribe", { method: "POST", body: form });
 }
 
-export const parseCommand = (text: string, stores: Pick<Store, "id" | "name" | "platform">[] = []) =>
+export const parseCommand = (text: string, stores: Pick<Store, "id" | "name" | "platform">[] = [],
+  market?: { country?: string; currency?: string }) =>
   api<CommandResult>("ai/commands/parse", {
-    method: "POST", json: { text, stores: stores.map(({ id, name, platform }) => ({ id, name, platform })) },
+    method: "POST",
+    json: { text, stores: stores.map(({ id, name, platform }) => ({ id, name, platform })), market: market ?? myMarket() },
   });
