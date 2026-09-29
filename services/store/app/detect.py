@@ -122,6 +122,37 @@ async def safe_get(http: httpx.AsyncClient, url: str, *, allow_local: bool = Fal
     return None
 
 
+ADMIN_STORE_RE = re.compile(r"^https://admin\.shopify\.com/store/([a-z0-9][a-z0-9-]*)(?:[/?#]|$)")
+
+
+async def shopify_name_from_admin(http: httpx.AsyncClient, origin: str, *, allow_local: bool = False,
+                                  resolve_ok=None) -> str | None:
+    """A Shopify store on its own domain sends <domain>/admin to its real admin address, which names the
+    store (https://admin.shopify.com/store/<name>/… or https://<name>.myshopify.com/admin). We only read
+    that redirect — nothing is followed and no login happens."""
+    url = f"{origin}/admin"
+    for _ in range(3):
+        parts = urlsplit(url)
+        if not allow_local and (parts.scheme != "https" or not await (resolve_ok or _host_is_public)(parts.hostname or "")):
+            return None
+        try:
+            r = await http.get(url, headers=UA, timeout=TIMEOUT, follow_redirects=False)
+        except httpx.HTTPError:
+            return None
+        loc = r.headers.get("location") if r.is_redirect else None
+        if not loc:
+            return None
+        loc = urljoin(url, loc)
+        host = (urlsplit(loc).hostname or "").lower()
+        if host.endswith(".myshopify.com") and SHOP_RE.fullmatch(host):
+            return host
+        m = ADMIN_STORE_RE.match(loc.lower())
+        if m:
+            return f"{m.group(1)}.myshopify.com"
+        url = loc              # e.g. mydomain.com/admin -> www.mydomain.com/admin
+    return None
+
+
 def _json(r: httpx.Response | None) -> dict | None:
     if r is None or r.status_code != 200:
         return None
@@ -161,10 +192,14 @@ async def detect(raw: str, http: httpx.AsyncClient, *, allow_local: bool = False
     text = home.content.decode("utf-8", "replace").lower()
     headers = " ".join(f"{k}:{v}" for k, v in home.headers.items()).lower()
 
-    if "x-shopid" in headers or "x-shopify-stage" in headers or "cdn.shopify.com" in text or "shopify.theme" in text:
+    shopify_marks = ("cdn.shopify.com", "shopify.theme", "/cdn/shop/", "shopify-digital-wallet", "myshopify.com")
+    if "x-shopid" in headers or "x-shopify-stage" in headers or any(m in text for m in shopify_marks):
         m = re.search(r'shopify\.shop\s*=\s*"([a-z0-9-]+\.myshopify\.com)"', text) or SHOP_RE.search(text)
         if m:
             return Detected("shopify", "Shopify", True, store=m.group(1))
+        name = await shopify_name_from_admin(http, origin, allow_local=allow_local, resolve_ok=resolve_ok)
+        if name:
+            return Detected("shopify", "Shopify", True, store=name)
         return Detected("shopify", "Shopify", True,
                         note="This is a Shopify store. Enter its Shopify name (yourstore.myshopify.com) in the Shopify card.")
 
