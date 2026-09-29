@@ -7,6 +7,8 @@ nobody settled in time — so a credit is never lost.
 Payments (contracts/README.md §5): the seller picks a pack, we create a `payments` row and
 a hosted checkout (Stripe or Safepay), and credits are added exactly once when the provider
 confirms — by webhook, by Safepay's signed redirect, or by asking Stripe on return.
+Merchants using Listing Agent inside the Shopify admin pay through Shopify Billing instead
+(a one-time app purchase they approve in Shopify; Shopify's App Store requires it).
 """
 import asyncio
 import json
@@ -16,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs
 
+import httpx
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -23,7 +27,9 @@ from pydantic_settings import BaseSettings
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from lagent_common import shopify as shopify_api
 from lagent_common.bus import EventBus
+from lagent_common.correlation import outgoing_headers
 from lagent_common.db import make_db, mark_processed
 from lagent_common.internal import current_user_id, require_internal
 from lagent_common.service import create_service
@@ -63,6 +69,15 @@ class Settings(BaseSettings):
     SAFEPAY_API_URL: str = ""
     SAFEPAY_CHECKOUT_URL: str = ""
 
+    # Shopify Billing (merchants inside the Shopify admin). Uses the same app as the store service.
+    SHOPIFY_CLIENT_ID: str = ""
+    SHOPIFY_CLIENT_SECRET: str = ""
+    # Development stores can only make test charges. true = those test charges add credits
+    # (switch on while Shopify reviews the app, off afterwards so test stores can't mint credits).
+    SHOPIFY_TEST_CHARGES: bool = False
+    STORE_URL: str = "http://store:8000"
+    INTERNAL_TOKEN: str = ""
+
     @property
     def api_base(self) -> str:
         return (self.PUBLIC_BASE_URL or f"http://localhost:{self.GATEWAY_PORT}").rstrip("/")
@@ -71,6 +86,7 @@ class Settings(BaseSettings):
 settings = Settings()
 engine, SessionLocal, get_db = make_db(settings.DATABASE_URL)
 bus = EventBus(settings.REDIS_URL, "billing")
+_http = httpx.AsyncClient(timeout=30)
 
 
 def _packs() -> list[dict]:
@@ -221,7 +237,61 @@ def reserve(data: ReserveIn, db: Session = Depends(get_db)):
 
 class CheckoutIn(BaseModel):
     pack_id: str
-    provider: str = Field(pattern="^(stripe|safepay)$")
+    provider: str = Field(pattern="^(stripe|safepay|shopify)$")
+    shop: str | None = Field(default=None, max_length=120)   # Shopify: the shop the merchant is in
+
+
+# ---------------- Shopify Billing ----------------
+
+SHOPIFY_BUY = """
+mutation Buy($name: String!, $price: MoneyInput!, $returnUrl: URL!, $test: Boolean) {
+  appPurchaseOneTimeCreate(name: $name, price: $price, returnUrl: $returnUrl, test: $test) {
+    appPurchaseOneTime { id status }
+    confirmationUrl
+    userErrors { field message }
+  }
+}"""
+# currentAppInstallation: which app the token belongs to. Charges must be made (and checked) through
+# Listing Agent's own app — a token of some other app would send the money to that app's owner.
+SHOPIFY_PURCHASE = """
+query Purchase($id: ID!) {
+  currentAppInstallation { app { apiKey } }
+  node(id: $id) { ... on AppPurchaseOneTime { id status test price { amount currencyCode } } }
+}"""
+SHOPIFY_DEV_STORE = "{ currentAppInstallation { app { apiKey } } shop { plan { partnerDevelopment } } }"
+
+
+def _our_app(data: dict) -> bool:
+    return ((data.get("currentAppInstallation") or {}).get("app") or {}).get("apiKey") == settings.SHOPIFY_CLIENT_ID
+
+
+def _shopify_ready() -> bool:
+    return bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET)
+
+
+async def _shop_token(user_id, shop: str) -> str:
+    """A working token of our app for the shop (the store service keeps and renews it)."""
+    try:
+        r = await _http.get(f"{settings.STORE_URL}/internal/shopify/billing-token",
+                            params={"user_id": str(user_id), "shop": shop},
+                            headers=outgoing_headers(settings.INTERNAL_TOKEN))
+    except httpx.HTTPError:
+        raise HTTPException(503, "Couldn't reach Shopify right now — try again in a moment.")
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = None
+        raise HTTPException(409 if r.status_code < 500 else 503, detail or "Couldn't reach Shopify right now.")
+    return r.json()["access_token"]
+
+
+async def _shopify_purchase(shop: str, token: str, purchase_id: str) -> dict:
+    data = await shopify_api.graphql(_http, shop, token, SHOPIFY_PURCHASE, {"id": purchase_id})
+    if not _our_app(data):
+        log.error("Shopify purchase %s checked with a token that isn't Listing Agent's app", purchase_id)
+        return {}
+    return data.get("node") or {}
 
 
 def _payment_out(row) -> dict:
@@ -261,7 +331,8 @@ def list_packs():
     return {
         "packs": [{"id": p["id"], "name": p.get("name") or p["id"].title(), "credits": int(p["credits"]),
                    "prices": {k.upper(): float(v) for k, v in p["prices"].items()}} for p in _packs()],
-        "providers": {"safepay": _safepay() is not None, "stripe": _stripe() is not None},
+        "providers": {"safepay": _safepay() is not None, "stripe": _stripe() is not None,
+                      "shopify": _shopify_ready()},
         "stripe_currency": stripe_cur,
     }
 
@@ -273,6 +344,8 @@ async def start_checkout(data: CheckoutIn, user_id: uuid.UUID = Depends(current_
     if pack is None:
         raise HTTPException(404, "That pack isn't on sale.")
     prices = {k.upper(): float(v) for k, v in pack["prices"].items()}
+    if data.provider == "shopify":
+        return await _start_shopify_checkout(db, user_id, pack, prices, (data.shop or "").lower())
     if data.provider == "stripe":
         provider, currency = _stripe(), settings.STRIPE_CURRENCY.upper()
         label = "Card payments"
@@ -311,6 +384,82 @@ async def start_checkout(data: CheckoutIn, user_id: uuid.UUID = Depends(current_
     return {"payment_id": pid, "checkout_url": co.url}
 
 
+async def _start_shopify_checkout(db: Session, user_id, pack: dict, prices: dict, shop: str) -> dict:
+    """A one-time app purchase: Shopify shows the merchant the price, they approve, and Shopify adds
+    it to their Shopify bill. Priced in USD (the pack's USD price)."""
+    if not _shopify_ready():
+        raise HTTPException(503, "Shopify payments aren't set up on this server yet.")
+    if not shopify_api.SHOP_RE.match(shop):
+        raise HTTPException(422, "Open Listing Agent from your Shopify admin to pay with Shopify.")
+    if "USD" not in prices:
+        raise HTTPException(422, "This pack has no USD price.")
+    token = await _shop_token(user_id, shop)
+    try:
+        info = await shopify_api.graphql(_http, shop, token, SHOPIFY_DEV_STORE)
+    except shopify_api.ShopifyError as exc:
+        raise HTTPException(503 if exc.retryable else 502, str(exc))
+    if not _our_app(info):
+        raise HTTPException(409, "This store isn't connected through Listing Agent's Shopify app — open it from your Shopify admin.")
+    dev = bool(((info.get("shop") or {}).get("plan") or {}).get("partnerDevelopment"))
+    if dev and not settings.SHOPIFY_TEST_CHARGES:
+        raise HTTPException(422, "This is a Shopify development store — it can't buy credits.")
+    amount = prices["USD"]
+    payment_id = db.execute(text(
+        "INSERT INTO payments (user_id, pack_id, credits, provider, amount, currency, shop) "
+        "VALUES (:u, :p, :c, 'shopify', :a, 'USD', :s) RETURNING id"),
+        {"u": str(user_id), "p": pack["id"], "c": int(pack["credits"]), "a": amount, "s": shop}).scalar()
+    db.commit()
+    pid = str(payment_id)
+    try:
+        data = await shopify_api.graphql(_http, shop, token, SHOPIFY_BUY, {
+            "name": f"Listing Agent — {pack.get('name') or pack['id']} ({int(pack['credits'])} credits)",
+            "price": {"amount": f"{amount:.2f}", "currencyCode": "USD"},
+            "returnUrl": f"{settings.api_base}/api/billing/payments/shopify/return?payment={pid}",
+            "test": dev,
+        })
+    except shopify_api.ShopifyError as exc:
+        _fail_payment(db, pid, str(exc))
+        raise HTTPException(503 if exc.retryable else 502, str(exc))
+    result = data.get("appPurchaseOneTimeCreate") or {}
+    errors = result.get("userErrors") or []
+    purchase = result.get("appPurchaseOneTime") or {}
+    if errors or not purchase.get("id") or not result.get("confirmationUrl"):
+        reason = errors[0].get("message") if errors else "Shopify didn't start the purchase."
+        _fail_payment(db, pid, reason)
+        raise HTTPException(502, reason)
+    db.execute(text("UPDATE payments SET provider_ref = :r WHERE id = :id"), {"r": purchase["id"], "id": pid})
+    db.commit()
+    return {"payment_id": pid, "checkout_url": result["confirmationUrl"]}
+
+
+async def _apply_shopify_purchase(db: Session, row) -> bool:
+    """Asks Shopify about one purchase and applies the answer. True if anything changed."""
+    try:
+        token = await _shop_token(row.user_id, row.shop)
+        purchase = await _shopify_purchase(row.shop, token, row.provider_ref)
+    except (HTTPException, shopify_api.ShopifyError) as exc:
+        log.warning("couldn't check Shopify purchase %s: %s", row.id, getattr(exc, "detail", exc))
+        return False
+    status = purchase.get("status")
+    if purchase.get("id") != row.provider_ref:
+        return False
+    if status == "ACTIVE":
+        price = purchase.get("price") or {}
+        if abs(float(price.get("amount") or 0) - float(row.amount)) > 0.001 or price.get("currencyCode") != row.currency:
+            log.error("Shopify amount mismatch on %s: %s", row.id, price)
+            _fail_payment(db, str(row.id), "Amount paid doesn't match the pack price.")
+            return True
+        if purchase.get("test") and not settings.SHOPIFY_TEST_CHARGES:
+            _fail_payment(db, str(row.id), "That was a test purchase, so no credits were added.")
+            return True
+        return await _credit_payment(db, str(row.id))
+    if status in ("DECLINED", "EXPIRED"):
+        _fail_payment(db, str(row.id), "The purchase was declined in Shopify." if status == "DECLINED"
+                      else "The purchase expired before it was approved.")
+        return True
+    return False
+
+
 @router.get("/payments/{payment_id}")
 async def get_payment(payment_id: uuid.UUID, user_id: uuid.UUID = Depends(current_user_id),
                       db: Session = Depends(get_db)):
@@ -339,6 +488,8 @@ async def _confirm_pending(db: Session, row) -> bool:
     if row.provider == "safepay" and (safepay := _safepay()):
         if await safepay.is_paid(row.provider_ref):
             return await _credit_payment(db, str(row.id))
+    if row.provider == "shopify" and _shopify_ready() and row.shop:
+        return await _apply_shopify_purchase(db, row)
     return False
 
 
@@ -417,6 +568,23 @@ async def safepay_return(request: Request, db: Session = Depends(get_db)):
         await _credit_payment(db, str(row.id))
     # Not confirmed yet: the Credits page keeps asking (GET /payments/<id> checks Safepay again).
     return RedirectResponse(f"{app_url}/credits?payment={row.id}", status_code=303)
+
+
+@router.get("/payments/shopify/return")
+async def shopify_return(payment: str = "", db: Session = Depends(get_db)):
+    """Shopify sends the merchant here after they approve (or decline) the purchase. We ask Shopify
+    for the result — nothing in the URL is trusted — and take them back into the app in their admin."""
+    try:
+        row = db.execute(text("SELECT * FROM payments WHERE provider = 'shopify' AND id = :id"),
+                         {"id": str(uuid.UUID(payment))}).first()
+    except ValueError:
+        row = None
+    if row is None or not row.shop:
+        return RedirectResponse(f"{settings.APP_URL.rstrip('/')}/credits?failed=1", status_code=303)
+    if row.status == "pending":
+        await _apply_shopify_purchase(db, row)
+    back = shopify_api.admin_app_url(row.shop, settings.SHOPIFY_CLIENT_ID, f"/credits?payment={row.id}")
+    return RedirectResponse(back, status_code=303)
 
 
 @router.post("/webhooks/safepay")

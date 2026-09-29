@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from pydantic_settings import BaseSettings
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -47,6 +47,7 @@ class User(Base):
     locked_until = Column(DateTime)
     country = Column(String(2), default="PK", nullable=False)     # where the seller sells
     currency = Column(String(3), default="PKR", nullable=False)
+    shopify_shop = Column(String, unique=True)        # accounts made by installing the Shopify app
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -169,6 +170,50 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     user.failed_logins, user.locked_until = 0, None
     db.commit()
     return _token(user)
+
+
+# ---------------- Shopify (internal: only the store service calls this) ----------------
+
+class ShopifySessionIn(BaseModel):
+    shop: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$")
+    create: bool = True            # False: only look the account up (404 if the shop has none yet)
+    name: str | None = Field(default=None, max_length=200)
+    email: str | None = Field(default=None, max_length=320)     # the shop's contact email (notifications only)
+    country: str | None = None
+    currency: str | None = None
+
+
+@router.post("/internal/shopify/session")
+async def shopify_session(data: ShopifySessionIn, db: Session = Depends(get_db)):
+    """The store service has verified a Shopify ID token for `shop`. Returns a normal Listing Agent
+    session for the shop's own account (one per shop), creating it on first install."""
+    user = db.query(User).filter(User.shopify_shop == data.shop).first()
+    if user:
+        if not user.is_active:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is deactivated.")
+        return {**_token(user), "created": False}
+    if not data.create:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No account for this shop yet.")
+    country = (data.country or "").upper()
+    country = country if country in MARKETS else "US"
+    currency = (data.currency or "").upper()
+    currency = currency if currency in CURRENCIES else currency_for(country)
+    user = User(email=data.shop, hashed_password=None, full_name=(data.name or "").strip() or data.shop.split(".")[0],
+                country=country, currency=currency, shopify_shop=data.shop)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:          # opened twice at the same moment: use the one that won
+        db.rollback()
+        user = db.query(User).filter(User.shopify_shop == data.shop).first()
+        if not user:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Couldn't create the account — try again.")
+        return {**_token(user), "created": False}
+    db.refresh(user)
+    contact = (data.email or "").strip().lower()
+    await bus.publish("user.registered", {"user_id": str(user.id), "email": contact if "@" in contact else "",
+                                          "full_name": user.full_name, "shopify_shop": data.shop})
+    return {**_token(user), "created": True}
 
 
 @router.get("/me")

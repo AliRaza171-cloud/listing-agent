@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import logging
 import re
+import secrets
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -26,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
 from lagent_common import daraz, ebay
+from lagent_common import shopify as shopify_api
 from lagent_common.correlation import outgoing_headers
 from lagent_common.db import make_db
 from lagent_common.internal import current_user_id, require_internal
@@ -38,6 +40,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     INTERNAL_TOKEN: str
     PUBLISHER_URL: str = "http://publisher:8000"
+    AUTH_URL: str = "http://auth:8000"
     # Local development only: lets you connect a store running on your own machine
     # (e.g. Smart Click at http://localhost:8000). Keep false in production.
     ALLOW_HTTP_STORES: bool = False
@@ -51,6 +54,9 @@ class Settings(BaseSettings):
     SHOPIFY_CLIENT_ID: str = ""
     SHOPIFY_CLIENT_SECRET: str = ""
     SHOPIFY_SCOPES: str = "write_products,read_locations,write_inventory,write_publications"
+    # The app's Shopify App Store page, once Shopify has approved it. When set, the Stores page
+    # sends sellers there to install (Shopify requires installs to start on Shopify).
+    SHOPIFY_APP_STORE_URL: str = ""
     # Inside Docker "localhost" is this container; a store running on your own PC is reached
     # through this name instead (same as the publisher). Empty on a server.
     STORE_LOCALHOST_ALIAS: str = ""
@@ -90,6 +96,15 @@ REQUIRED_CREDENTIALS = {
 }
 
 
+# What a seller may submit for a manual ("Advanced") connection — anything else is dropped, so nobody can
+# slip in fields the server sets itself (e.g. refresh tokens or expiry times).
+ALLOWED_CREDENTIALS = {
+    "woocommerce": {"consumer_key", "consumer_secret", "wp_username", "wp_app_password"},
+    "custom": {"api_key"},
+    "shopify": {"access_token", "client_id", "client_secret"},
+}
+
+
 def _missing(platform: str, credentials: dict) -> set[str]:
     have = {k for k, v in credentials.items() if str(v or "").strip()}
     if platform == "shopify" and {"client_id", "client_secret"} <= have:
@@ -109,6 +124,9 @@ class StoreConnection(Base):
     status = Column(Enum("active", "error", "disconnected", name="connection_status", create_type=False),
                     default="active", nullable=False)
     last_error = Column(String)
+    # Shopify: the client ID of OUR app when the token came from it (set by the server only; '*' = our
+    # app before this was recorded). A shop connected with its own app's keys has None.
+    via_app = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -170,13 +188,14 @@ async def _test(platform: str, store_url: str, credentials: dict) -> None:
 
 
 def _save(db: Session, user_id, platform: str, name: str, store_url: str, credentials: dict,
-          replace: bool) -> StoreConnection:
+          replace: bool, via_app: str | None = None) -> StoreConnection:
     """Creates the connection, or (replace=True, used by one-click reconnects) refreshes its keys."""
     existing = db.query(StoreConnection).filter_by(user_id=user_id, platform=platform, store_url=store_url).first()
     if existing and not replace and existing.status != "disconnected":
         raise HTTPException(409, "This store is already connected.")
     store = existing or StoreConnection(user_id=user_id, platform=platform, store_url=store_url)
     store.name = name
+    store.via_app = via_app
     store.credentials_encrypted = encrypt_credentials(credentials)
     store.status, store.last_error = "active", None
     db.add(store)
@@ -193,6 +212,7 @@ def _save(db: Session, user_id, platform: str, name: str, store_url: str, creden
 async def connect_store(data: ConnectIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     if data.store_url.lower().startswith("http://") and not settings.ALLOW_HTTP_STORES:
         raise HTTPException(422, "The store address must start with https://")
+    data.credentials = {k: v for k, v in data.credentials.items() if k in ALLOWED_CREDENTIALS[data.platform]}
     missing = _missing(data.platform, data.credentials)
     if missing:
         if data.platform == "shopify":
@@ -277,7 +297,8 @@ def connect_options():
             "woocommerce": online, "custom": True,
             "daraz": bool(settings.DARAZ_APP_KEY and settings.DARAZ_APP_SECRET) and online,
             "ebay": bool(settings.EBAY_CLIENT_ID and settings.EBAY_CLIENT_SECRET and settings.EBAY_RU_NAME) and online,
-            "ebay_marketplaces": [{"id": m.id, "name": m.name, "currency": m.currency} for m in ebay.MARKETPLACES.values()]}
+            "ebay_marketplaces": [{"id": m.id, "name": m.name, "currency": m.currency} for m in ebay.MARKETPLACES.values()],
+            "shopify_app_store_url": settings.SHOPIFY_APP_STORE_URL or None}
 
 
 def _reachable(url: str) -> str:
@@ -400,6 +421,13 @@ async def woocommerce_callback(request: Request, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+# The website's Connect button: when Listing Agent's app is already installed, Shopify may skip its
+# approval screen. So a Connect link started by someone else and opened by a merchant must not connect the
+# merchant's shop to that other person's account. The callback therefore only parks the token and sends
+# the browser back to the Stores page with a one-time code (in the URL #fragment, which never reaches a
+# server). The connection is made only when the signed-in account that started it hands that code back.
+# (Works whatever domains the website and API use — no cookies.)
+
 @router.post("/connect/shopify")
 def start_shopify(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     """Shopify OAuth: the seller approves Listing Agent's app in their Shopify admin."""
@@ -423,9 +451,9 @@ def shopify_hmac_ok(params: dict[str, str], secret: str) -> bool:
 def shopify_install(request: Request):
     """Public. Shopify's App URL: where a merchant lands after clicking Install in the Shopify App
     Store (and each time they open the app from their Shopify admin). We check Shopify's signature,
-    then hand the shop to the web app's Stores page, which signs the merchant in (or up) and starts
-    the normal OAuth connect for that shop. Nothing is saved here: the token only arrives in
-    shopify_callback, after the merchant approves in their own Shopify admin."""
+    then hand the shop to the web app's Stores page, which signs the seller in (or up) and OFFERS to
+    connect that shop (they confirm with a click). Nothing is saved here. (The embedded app's App URL
+    is the website itself; this older entry point just keeps old links working.)"""
     params = dict(request.query_params)
     stores_page = f"{settings.APP_URL.rstrip('/')}/stores"
     shop = params.get("shop", "").lower()
@@ -436,7 +464,7 @@ def shopify_install(request: Request):
 
 @router.get("/connect/shopify/callback")
 async def shopify_callback(request: Request, db: Session = Depends(get_db)):
-    """Public (the seller's browser comes back here from Shopify)."""
+    """Public (the seller's browser comes back here from Shopify). Parks the token; see above."""
     params = dict(request.query_params)
     app_url = settings.APP_URL.rstrip("/")
     req = _open_request(db, params.get("state", ""), "shopify")
@@ -451,24 +479,202 @@ async def shopify_callback(request: Request, db: Session = Depends(get_db)):
     if not params.get("code"):
         _finish(db, req, error="The connection was cancelled in Shopify.")
         return RedirectResponse(back, status_code=303)
+    if (req.extra or {}).get("parked"):
+        return RedirectResponse(back, status_code=303)       # this link was already used
     try:
-        r = await _http.post(f"https://{shop}/admin/oauth/access_token", json={
-            "client_id": settings.SHOPIFY_CLIENT_ID, "client_secret": settings.SHOPIFY_CLIENT_SECRET,
-            "code": params["code"]})
-        token = r.json().get("access_token") if r.status_code == 200 else None
-    except (httpx.HTTPError, ValueError):
-        token = None
-    if not token:
+        tokens = await shopify_api.code_exchange(_http, shop, settings.SHOPIFY_CLIENT_ID,
+                                                 settings.SHOPIFY_CLIENT_SECRET, params["code"])
+    except shopify_api.ShopifyError:
         _finish(db, req, error="Shopify didn't give access. Try connecting again.")
         return RedirectResponse(back, status_code=303)
-    creds = {"access_token": token}
+    code = secrets.token_urlsafe(24)
+    req.extra = {**(req.extra or {}), "parked": encrypt_credentials(tokens.as_credentials()),
+                 "confirm": hashlib.sha256(code.encode()).hexdigest()}
+    db.commit()
+    return RedirectResponse(f"{back}#confirm={code}", status_code=303)
+
+
+class ConfirmIn(BaseModel):
+    code: str = Field(min_length=10, max_length=200)
+
+
+@router.post("/connect/requests/{request_id}/confirm")
+async def confirm_connect(request_id: uuid.UUID, data: ConfirmIn, user_id: uuid.UUID = Depends(current_user_id),
+                          db: Session = Depends(get_db)):
+    """The Stores page, signed in, hands back the one-time code from the #fragment. Only the account that
+    started the Connect, in a browser that actually came back from Shopify, can finish it."""
+    req = db.get(ConnectRequest, request_id)
+    if not req or req.user_id != user_id or req.platform != "shopify":
+        raise HTTPException(404, "Not found.")
+    extra = req.extra or {}
+    if req.status != "pending" or not extra.get("parked") or \
+            not hmac.compare_digest(hashlib.sha256(data.code.encode()).hexdigest(), extra.get("confirm") or ""):
+        raise HTTPException(409, "This connection link isn't valid any more — press Connect again.")
+    if req.created_at < datetime.utcnow() - timedelta(minutes=REQUEST_MINUTES):
+        _finish(db, req, error="That connection link expired. Please click Connect again.")
+        raise HTTPException(409, "That connection link expired. Please click Connect again.")
+    creds = decrypt_credentials(extra["parked"])
+    req.extra = {k: v for k, v in extra.items() if k not in ("parked", "confirm")}   # the token lives only in the connection
     try:
         await _test("shopify", req.store_url, creds)
     except ConnectionFailed as exc:
         _finish(db, req, error=str(exc))
-        return RedirectResponse(back, status_code=303)
-    _finish(db, req, store=_save(db, req.user_id, "shopify", req.name, req.store_url, creds, replace=True))
-    return RedirectResponse(back, status_code=303)
+        raise HTTPException(422, str(exc))
+    _finish(db, req, store=_save(db, req.user_id, "shopify", req.name, req.store_url, creds, replace=True,
+                                 via_app=settings.SHOPIFY_CLIENT_ID))
+    return connect_status(request_id, user_id, db)
+
+
+# ---------------------------------------------------------------- Shopify: embedded app + expiring tokens
+# Listing Agent's public Shopify app opens inside the Shopify admin. The page there sends us the
+# ID token App Bridge gives it; we check it, make sure we hold a working offline token for the
+# shop, and answer with a normal Listing Agent session (the shop's account, created on install).
+
+SHOPIFY_RENEW_SECONDS = 300          # renew the 1-hour access token when under 5 minutes remain
+SHOPIFY_REEXCHANGE_DAYS = 7          # swap for fresh tokens when the 90-day refresh token nears its end
+SHOPIFY_REOPEN = ("Shopify access expired — open Listing Agent from your Shopify admin (Apps) "
+                  "to renew it, or press Connect on Shopify again.")
+
+
+def _shopify_ready() -> bool:
+    return bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET)
+
+
+def _is_our_app(store: StoreConnection) -> bool:
+    return bool(store.via_app) and store.via_app in (settings.SHOPIFY_CLIENT_ID, "*")
+
+
+async def _fresh_shopify_credentials(db: Session, store: StoreConnection) -> dict:
+    """Expiring Shopify tokens: renew with the refresh token when under 5 minutes remain. Refresh
+    tokens rotate (each renewal kills the old one), so the renewal holds a row lock."""
+    creds = decrypt_credentials(store.credentials_encrypted)
+    if not creds.get("refresh_token") or int(creds.get("expires_at") or 0) - time.time() > SHOPIFY_RENEW_SECONDS:
+        return creds                   # non-expiring token (own app / older connection) or still fresh
+    locked = (db.query(StoreConnection).filter(StoreConnection.id == store.id)
+              .populate_existing().with_for_update().one())
+    creds = decrypt_credentials(locked.credentials_encrypted)
+    if int(creds.get("expires_at") or 0) - time.time() > SHOPIFY_RENEW_SECONDS:
+        db.commit()                    # renewed by another request while we waited
+        return creds
+    shop = shopify_api._host(locked.store_url)
+    if int(creds.get("refresh_expires_at") or 0) <= time.time() or not _shopify_ready():
+        locked.status, locked.last_error = "error", SHOPIFY_REOPEN
+        db.commit()
+        raise HTTPException(409, SHOPIFY_REOPEN)
+    try:
+        tokens = await shopify_api.refresh(_http, shop, settings.SHOPIFY_CLIENT_ID, settings.SHOPIFY_CLIENT_SECRET,
+                                           creds["refresh_token"])
+    except shopify_api.ShopifyError as exc:
+        if exc.retryable:
+            db.rollback()
+            raise HTTPException(503, "Shopify isn't answering right now — try again in a minute.")
+        locked.status, locked.last_error = "error", SHOPIFY_REOPEN
+        db.commit()
+        raise HTTPException(409, SHOPIFY_REOPEN)
+    creds = {**creds, **tokens.as_credentials(settings.SHOPIFY_CLIENT_ID)}
+    locked.credentials_encrypted = encrypt_credentials(creds)
+    locked.status, locked.last_error = "active", None
+    db.commit()
+    return creds
+
+
+class ShopifySessionIn(BaseModel):
+    id_token: str = Field(min_length=20, max_length=4000)
+
+
+async def _auth_session(shop: str, *, create: bool, info: dict | None = None) -> dict | None:
+    """The shop's own Listing Agent account (auth). create=False: None if the shop has none yet."""
+    try:
+        r = await _http.post(f"{settings.AUTH_URL}/internal/shopify/session", headers=outgoing_headers(settings.INTERNAL_TOKEN),
+                             json={"shop": shop, "create": create, **(info or {})})
+    except httpx.HTTPError:
+        raise HTTPException(503, "Couldn't sign you in right now — reload the app in a moment.")
+    if r.status_code == 404 and not create:
+        return None
+    if r.status_code >= 400:
+        detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else None
+        raise HTTPException(503 if r.status_code >= 500 else r.status_code, detail or "Couldn't sign you in.")
+    return r.json()
+
+
+async def _shop_info(shop: str, access_token: str) -> dict:
+    """Name, contact email and market for a new account. Best effort: defaults if Shopify is slow."""
+    try:
+        data = await shopify_api.graphql(_http, shop, access_token, shopify_api.SHOP_INFO)
+    except shopify_api.ShopifyError as exc:
+        log.warning("shop info for %s unavailable: %s", shop, exc)
+        return {}
+    s = data.get("shop") or {}
+    return {"name": s.get("name"), "email": s.get("contactEmail") or s.get("email"),
+            "country": (s.get("billingAddress") or {}).get("countryCodeV2"), "currency": s.get("currencyCode")}
+
+
+def _save_shop_tokens(db: Session, user_id, name: str, store_url: str, tokens: "shopify_api.Tokens") -> StoreConnection:
+    creds = tokens.as_credentials(settings.SHOPIFY_CLIENT_ID)
+    try:
+        return _save(db, user_id, "shopify", name, store_url, creds, replace=True, via_app=settings.SHOPIFY_CLIENT_ID)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        # The app was opened twice at the same moment and the other request just added the row: update it.
+        return _save(db, user_id, "shopify", name, store_url, creds, replace=True, via_app=settings.SHOPIFY_CLIENT_ID)
+
+
+@router.post("/shopify/session")
+async def shopify_session(data: ShopifySessionIn, db: Session = Depends(get_db)):
+    """Public (the embedded app calls it with App Bridge's ID token, which proves the shop).
+    Always the shop's OWN account: whoever manages the shop in Shopify works in it — never in some
+    other Listing Agent account that also connected the shop from our website."""
+    if not _shopify_ready():
+        raise HTTPException(503, "Shopify isn't set up on this server yet.")
+    try:
+        claims = shopify_api.verify_id_token(data.id_token, settings.SHOPIFY_CLIENT_ID, settings.SHOPIFY_CLIENT_SECRET)
+    except shopify_api.ShopifyError:
+        raise HTTPException(401, "Couldn't confirm your Shopify store — reload Listing Agent in Shopify.")
+    shop = claims["shop"]
+    store_url = f"https://{shop}"
+    account = await _auth_session(shop, create=False)
+    conn = None
+    if account:
+        conn = db.query(StoreConnection).filter_by(user_id=uuid.UUID(account["user"]["id"]), platform="shopify",
+                                                    store_url=store_url).first()
+    creds = decrypt_credentials(conn.credentials_encrypted) if conn else {}
+    now = time.time()
+    usable = (conn is not None and conn.status == "active" and _is_our_app(conn) and bool(creds.get("access_token"))
+              and (not creds.get("refresh_token")
+                   or int(creds.get("refresh_expires_at") or 0) - now > SHOPIFY_REEXCHANGE_DAYS * 86400))
+    tokens = None
+    if not usable:
+        try:
+            tokens = await shopify_api.token_exchange(_http, shop, settings.SHOPIFY_CLIENT_ID,
+                                                      settings.SHOPIFY_CLIENT_SECRET, data.id_token)
+        except shopify_api.ShopifyError as exc:
+            if exc.retryable:
+                raise HTTPException(503, "Shopify isn't answering right now — reload the app in a minute.")
+            raise HTTPException(401, "Shopify didn't give access — reload Listing Agent in Shopify.")
+    info = {}
+    if account is None:            # first install: an account named after the shop
+        info = await _shop_info(shop, tokens.access_token)
+        account = await _auth_session(shop, create=True, info=info)
+    if tokens is not None:
+        name = (info.get("name") or (conn.name if conn else "") or shop.split(".")[0])[:80]
+        _save_shop_tokens(db, uuid.UUID(account["user"]["id"]), name, store_url, tokens)
+    return {"access_token": account["access_token"], "token_type": "bearer", "expires_in": account["expires_in"],
+            "user": account["user"], "shop": shop, "created": bool(account.get("created"))}
+
+
+@router.get("/internal/shopify/billing-token")
+async def shopify_billing_token(user_id: uuid.UUID = Query(...), shop: str = Query(...), db: Session = Depends(get_db)):
+    """Internal (billing): a working token of OUR app for the user's shop — Shopify Billing charges
+    go through the app that asks for them, so a shop connected with its own keys can't be used."""
+    shop = shop.lower()
+    if not SHOP_RE.match(shop):
+        raise HTTPException(422, "Not a Shopify store.")
+    store = db.query(StoreConnection).filter_by(user_id=user_id, platform="shopify", store_url=f"https://{shop}").first()
+    if not store or store.status == "disconnected" or store.via_app != settings.SHOPIFY_CLIENT_ID:
+        raise HTTPException(409, "Open Listing Agent from your Shopify admin to buy credits with Shopify.")
+    creds = await _fresh_shopify_credentials(db, store)
+    return {"shop": shop, "access_token": creds["access_token"]}
 
 
 # ---------------------------------------------------------------- Daraz
@@ -718,6 +924,9 @@ async def shopify_webhooks(request: Request, db: Session = Depends(get_db)):
         db.commit()
         log.info("shopify shop/redact for %s: removed %d connection(s)", shop, len(conns))
     elif topic == "app/uninstalled":
+        # Only connections made through Listing Agent's app die with it; a shop connected with its
+        # own app's keys (Advanced) keeps working.
+        conns = [c for c in conns if _is_our_app(c)]
         for c in conns:
             c.status = "disconnected"
             c.last_error = "Listing Agent was uninstalled in Shopify. Connect again to publish."
@@ -762,6 +971,10 @@ async def credentials_for_publisher(store_id: uuid.UUID, user_id: uuid.UUID = Qu
         creds = await _fresh_daraz_credentials(db, store)
     elif store.platform == "ebay":
         creds = await _fresh_ebay_credentials(db, store)
+    elif store.platform == "shopify":
+        # the publisher only needs the access token; the refresh token never leaves this service
+        creds = {k: v for k, v in (await _fresh_shopify_credentials(db, store)).items()
+                 if k not in ("refresh_token", "refresh_expires_at")}
     else:
         creds = decrypt_credentials(store.credentials_encrypted)
     return {"platform": store.platform, "store_url": store.store_url, "credentials": creds}

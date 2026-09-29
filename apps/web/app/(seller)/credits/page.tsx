@@ -3,7 +3,8 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import {
-  ApiError, getCredits, getPacks, getPayment, startCheckout, type Credits, type Pack, type PacksInfo, type Payment,
+  ApiError, embeddedShop, getCredits, getPacks, getPayment, isEmbedded, startCheckout,
+  type Credits, type Pack, type PacksInfo, type Payment, type PayProvider,
 } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { parseUtc, REASON_NAMES } from "@/lib/format";
@@ -22,7 +23,7 @@ function money(amount: number, currency: string): string {
   }
 }
 
-type Provider = "safepay" | "stripe";
+type Provider = PayProvider;
 
 function CreditsInner() {
   const params = useSearchParams();
@@ -31,7 +32,9 @@ function CreditsInner() {
   const returnFailed = params.get("failed") === "1";
 
   const { refreshCredits, user } = useSession();
-  const inPakistan = (user.country || "PK") === "PK";   // Safepay (JazzCash, EasyPaisa) is for Pakistan
+  // Inside the Shopify admin, merchants pay through Shopify (their Shopify bill) — Shopify's rule.
+  const inShopify = isEmbedded();
+  const inPakistan = !inShopify && (user.country || "PK") === "PK";   // Safepay (JazzCash, EasyPaisa) is for Pakistan
   const [data, setData] = useState<Credits | null>(null);
   const [shop, setShop] = useState<PacksInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,8 +80,10 @@ function CreditsInner() {
     setError(null);
     setBusy(`${pack.id}:${provider}`);
     try {
-      const { checkout_url } = await startCheckout(pack.id, provider);
-      window.location.href = checkout_url;
+      const { checkout_url } = await startCheckout(pack.id, provider, provider === "shopify" ? embeddedShop() : null);
+      // Shopify's approval page has to open in the whole admin window, not inside our frame.
+      if (provider === "shopify") window.open(checkout_url, "_top");
+      else window.location.href = checkout_url;
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't open the payment page.");
       setBusy(null);
@@ -86,8 +91,8 @@ function CreditsInner() {
   }
 
   const providers = shop?.providers;
-  const noProviders = shop !== null && !providers?.safepay && !providers?.stripe;
-  const stripeCur = shop?.stripe_currency ?? "USD";
+  const noProviders = shop !== null && (inShopify ? !providers?.shopify : !providers?.safepay && !providers?.stripe);
+  const stripeCur = inShopify ? "USD" : shop?.stripe_currency ?? "USD";
 
   return (
     <>
@@ -128,7 +133,8 @@ function CreditsInner() {
         <div className="card-head"><h2>Buy credits</h2></div>
         {noProviders && (
           <p className="small muted">
-            Payments aren’t set up on this server yet. Add Safepay and/or Stripe keys to the backend’s <code>.env</code>.
+            {inShopify ? "Buying credits isn’t available yet — please check back soon."
+              : <>Payments aren’t set up on this server yet. Add Safepay and/or Stripe keys to the backend’s <code>.env</code>.</>}
           </p>
         )}
         {shop && shop.packs.length === 0 && !noProviders && <p className="small muted">No packs on sale right now.</p>}
@@ -150,14 +156,21 @@ function CreditsInner() {
                 </span>
                 {perCredit !== null && inPakistan && <span className="small muted">Rs {perCredit.toFixed(perCredit < 10 ? 1 : 0)} per listing</span>}
                 <div className="pack-actions">
-                  {providers?.safepay && inPakistan && pkr !== undefined && (
+                  {inShopify && providers?.shopify && other !== undefined && (
+                    <button type="button" className="btn btn-primary btn-block" disabled={busy !== null}
+                      onClick={() => buy(pack, "shopify")}>
+                      {busy === `${pack.id}:shopify` ? <span className="spinner" /> : null}
+                      Buy with Shopify
+                    </button>
+                  )}
+                  {!inShopify && providers?.safepay && inPakistan && pkr !== undefined && (
                     <button type="button" className="btn btn-primary btn-block" disabled={busy !== null}
                       onClick={() => buy(pack, "safepay")}>
                       {busy === `${pack.id}:safepay` ? <span className="spinner" /> : null}
                       JazzCash · EasyPaisa · Card
                     </button>
                   )}
-                  {providers?.stripe && other !== undefined && (
+                  {!inShopify && providers?.stripe && other !== undefined && (
                     <button type="button" className={`btn btn-block ${providers.safepay && inPakistan ? "btn-ghost" : "btn-primary"}`}
                       disabled={busy !== null} onClick={() => buy(pack, "stripe")}>
                       {busy === `${pack.id}:stripe` ? <span className="spinner" /> : null}
@@ -169,7 +182,10 @@ function CreditsInner() {
             );
           })}
         </div>
-        {(providers?.safepay || providers?.stripe) && (
+        {inShopify && providers?.shopify && (
+          <p className="small muted">Approve the purchase in Shopify — it’s added to your Shopify bill, in US dollars.</p>
+        )}
+        {!inShopify && (providers?.safepay || providers?.stripe) && (
           <p className="small muted">You’ll pay on {providers.safepay && providers.stripe ? "Safepay’s or Stripe’s" : providers.safepay ? "Safepay’s" : "Stripe’s"} secure page — we never see your card details.</p>
         )}
       </section>

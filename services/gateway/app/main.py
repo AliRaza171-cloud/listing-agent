@@ -54,12 +54,14 @@ PUBLIC = {
     # payment providers call these; billing checks their signatures
     ("billing", "POST", "webhooks/stripe"), ("billing", "POST", "webhooks/safepay"),
     ("billing", "GET", "payments/safepay/return"), ("billing", "POST", "payments/safepay/return"),
+    ("billing", "GET", "payments/shopify/return"),   # checked with Shopify, not trusted from the URL
     # one-click store connections: WooCommerce posts keys here, Shopify sends the seller back here;
     # the store service only accepts them for a pending, one-time connect request
     ("store", "POST", "connect/woocommerce/callback"), ("store", "GET", "connect/shopify/callback"),
     ("store", "GET", "connect/daraz/callback"), ("store", "GET", "connect/ebay/callback"),
     ("store", "GET", "ebay/account-deletion"), ("store", "POST", "ebay/account-deletion"),  # eBay requires this
     ("store", "POST", "shopify/webhooks"),   # verified with Shopify's HMAC header
+    ("store", "POST", "shopify/session"),     # the embedded app signs in with Shopify's ID token (checked by store)
     ("store", "GET", "shopify/install"),     # Shopify App URL: merchants arrive here from the App Store
     ("store", "POST", "connect/custom/callback"),  # Smart Click etc. send the approved key here
 }

@@ -46,7 +46,7 @@ def _notify(db: Session, user_id: str, kind: str, title: str, body: str, link: s
     if not email:
         return None
     contact = db.execute(text("SELECT email FROM user_contacts WHERE user_id = :u"), {"u": user_id}).first()
-    return {"to": contact.email, "subject": title, "body": body} if contact else None
+    return {"to": contact.email, "subject": title, "body": body} if contact and contact.email else None
 
 
 def _handler(build):
@@ -68,6 +68,9 @@ async def on_user_registered(event: dict) -> None:
     data = event["data"]
     with SessionLocal() as db:
         if not mark_processed(db, event):
+            return
+        if "@" not in (data.get("email") or ""):   # e.g. a Shopify shop that shares no contact email
+            db.commit()
             return
         db.execute(text("INSERT INTO user_contacts (user_id, email, full_name) VALUES (:u, :e, :n) "
                         "ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email, full_name = EXCLUDED.full_name"),

@@ -110,10 +110,61 @@ export class ApiError extends Error {
   }
 }
 
+// ---------------- Shopify (Listing Agent inside the Shopify admin) ----------------
+// There the page runs in an iframe with Shopify's App Bridge loaded (window.shopify). We sign in
+// with the ID token App Bridge gives us and keep the session in memory only: browser storage in
+// that iframe is shared by every shop a merchant opens (and blocked in some browsers).
+
+type AppBridge = { idToken: () => Promise<string>; config?: { shop?: string } };
+declare global {
+  interface Window { shopify?: AppBridge }
+}
+
+let embeddedShopDomain: string | null = null;
+
+export function isEmbedded(): boolean {
+  if (typeof window === "undefined" || !window.shopify) return false;
+  try {
+    return window.top !== window.self;
+  } catch {
+    return true;   // a cross-origin parent: we're framed
+  }
+}
+
+/** The shop this embedded page belongs to (e.g. coolshop.myshopify.com). */
+export function embeddedShop(): string | null {
+  if (!isEmbedded()) return null;
+  if (!embeddedShopDomain) {
+    const fromUrl = new URLSearchParams(window.location.search).get("shop");
+    embeddedShopDomain = (window.shopify?.config?.shop || fromUrl || "").toLowerCase() || null;
+  }
+  return embeddedShopDomain;
+}
+
+let signingIn: Promise<User> | null = null;
+
+/** Signs in (or re-signs in) with Shopify's ID token. Safe to call from many places at once. */
+export function embeddedSignIn(): Promise<User> {
+  if (!signingIn) {
+    signingIn = (async () => {
+      const idToken = await window.shopify!.idToken();
+      const res = await api<TokenResponse & { shop: string }>("store/shopify/session", {
+        method: "POST", json: { id_token: idToken }, auth: false,
+      });
+      embeddedShopDomain = res.shop;
+      return saveSession(res);
+    })().finally(() => { signingIn = null; });
+  }
+  return signingIn;
+}
+
 // ---------------- session ----------------
 
 export function getSession(): Session | null {
   if (typeof window === "undefined") return null;
+  if (isEmbedded()) {
+    return memorySession && memorySession.expiresAt > Date.now() + 30_000 ? memorySession : null;
+  }
   try {
     const raw = window.localStorage.getItem(TOKEN_KEY);
     if (!raw) return null;
@@ -130,12 +181,13 @@ export function getSession(): Session | null {
 
 function saveSession(res: { access_token: string; expires_in: number; user: User }): User {
   const s: Session = { token: res.access_token, expiresAt: Date.now() + res.expires_in * 1000, user: res.user };
+  memorySession = s;
+  if (isEmbedded()) return res.user;       // memory only (see above)
   try {
     window.localStorage.setItem(TOKEN_KEY, JSON.stringify(s));
   } catch {
     /* private mode: session lasts for this tab only */
   }
-  memorySession = s;
   return res.user;
 }
 
@@ -173,7 +225,7 @@ function messageFrom(body: unknown, status: number): string {
   return `Request failed (${status}).`;
 }
 
-type Options = { method?: string; json?: unknown; body?: BodyInit; contentType?: string; auth?: boolean };
+type Options = { method?: string; json?: unknown; body?: BodyInit; contentType?: string; auth?: boolean; retried?: boolean };
 
 export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const headers: Record<string, string> = {};
@@ -184,10 +236,8 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   } else if (opts.contentType) {
     headers["Content-Type"] = opts.contentType;
   }
-  if (opts.auth !== false) {
-    const t = token();
-    if (t) headers["Authorization"] = `Bearer ${t}`;
-  }
+  const sentToken = opts.auth !== false ? token() : null;
+  if (sentToken) headers["Authorization"] = `Bearer ${sentToken}`;
 
   let res: Response;
   try {
@@ -196,7 +246,15 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
     throw new ApiError(0, `Can't reach the server at ${API_URL}. Is docker compose running?`);
   }
 
-  if (res.status === 401 && opts.auth !== false) {
+  if (res.status === 401 && opts.auth !== false && isEmbedded()) {
+    // Inside Shopify: our session ran out — sign in again with a fresh Shopify ID token, then retry once.
+    // Several requests can fail together: only one signs in; the others wait for it or reuse its session.
+    if (!opts.retried) {
+      if (signingIn) await signingIn.catch(() => undefined);      // another request is already signing in
+      else if (token() === sentToken) await embeddedSignIn();     // nobody has renewed it yet: we do
+      return api<T>(path, { ...opts, retried: true });
+    }
+  } else if (res.status === 401 && opts.auth !== false) {
     clearSession();
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       const next = encodeURIComponent(window.location.pathname);
@@ -242,7 +300,9 @@ export const getMe = () => api<User>("auth/me");
 export async function updateMe(patch: { full_name?: string | null; country?: string; currency?: string }): Promise<User> {
   const user = await api<User>("auth/me", { method: "PATCH", json: patch });
   const s = getSession();
-  if (s && typeof window !== "undefined") {
+  if (s && isEmbedded()) {
+    memorySession = { ...s, user };
+  } else if (s && typeof window !== "undefined") {
     try { window.localStorage.setItem(TOKEN_KEY, JSON.stringify({ ...s, user })); } catch { /* ignore */ }
   }
   return user;
@@ -256,14 +316,17 @@ export function myMarket(): { country: string; currency: string } {
 export const getCredits = () => api<Credits>("billing/credits");
 
 export type Pack = { id: string; name: string; credits: number; prices: Record<string, number> };
-export type PacksInfo = { packs: Pack[]; providers: { safepay: boolean; stripe: boolean }; stripe_currency: string };
+export type PayProvider = "stripe" | "safepay" | "shopify";
+export type PacksInfo = { packs: Pack[]; providers: { safepay: boolean; stripe: boolean; shopify?: boolean }; stripe_currency: string };
 export type Payment = {
-  id: string; status: "pending" | "paid" | "failed"; provider: "stripe" | "safepay"; pack_id: string;
+  id: string; status: "pending" | "paid" | "failed"; provider: PayProvider; pack_id: string;
   credits: number; amount: number; currency: string; error: string | null;
 };
 export const getPacks = () => api<PacksInfo>("billing/packs");
-export const startCheckout = (pack_id: string, provider: "stripe" | "safepay") =>
-  api<{ payment_id: string; checkout_url: string }>("billing/checkout", { method: "POST", json: { pack_id, provider } });
+export const startCheckout = (pack_id: string, provider: PayProvider, shop?: string | null) =>
+  api<{ payment_id: string; checkout_url: string }>("billing/checkout", {
+    method: "POST", json: { pack_id, provider, shop: shop ?? null },
+  });
 export const getPayment = (id: string) => api<Payment>(`billing/payments/${id}`);
 
 export const listProducts = () => api<Product[]>("catalog/products");
@@ -317,6 +380,7 @@ export type ConnectRequest = {
 export type ConnectOptions = {
   shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean; ebay?: boolean;
   ebay_marketplaces?: { id: string; name: string; currency: string }[];
+  shopify_app_store_url?: string | null;   // once approved: installs start on the Shopify App Store
 };
 export const getConnectOptions = () => api<ConnectOptions>("store/connect/options");
 export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "daraz" | "ebay", store: string, name?: string,
@@ -325,6 +389,9 @@ export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "d
     method: "POST", json: { store, name: name || null, ...(extra ?? {}) },
   });
 export const getConnectRequest = (id: string) => api<ConnectRequest>(`store/connect/requests/${id}`);
+/** Shopify Connect: back from Shopify with a one-time code (#confirm=…) — only the account that started it can finish it. */
+export const confirmConnect = (id: string, code: string) =>
+  api<ConnectRequest>(`store/connect/requests/${id}/confirm`, { method: "POST", json: { code } });
 
 export async function transcribe(audio: Blob): Promise<{ text: string; language: string | null }> {
   // The voice service checks the plain type ("audio/webm"), so drop codec parameters.

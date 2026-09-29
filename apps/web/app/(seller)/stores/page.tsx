@@ -3,9 +3,9 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  myMarket,
+  isEmbedded, myMarket,
   type ConnectOptions,
-  ApiError, connectStore, disconnectStore, getConnectOptions, getConnectRequest, listStores, startConnect, type Store,
+  ApiError, confirmConnect, connectStore, disconnectStore, getConnectOptions, getConnectRequest, listStores, startConnect, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
 
@@ -106,9 +106,9 @@ function Stores() {
     getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false, daraz: false, ebay: false }));
   }, [load]);
 
-  // From the Shopify App Store: connect that shop straight away (Shopify then asks the merchant
-  // to approve). If it's already connected — the merchant just opened the app from their admin —
-  // there's nothing to do.
+  // A link with ?shopify_install=<shop> (e.g. from our older Shopify App URL) suggests connecting that
+  // shop. We ask first rather than connecting by ourselves: a link can come from anyone.
+  const [offerShop, setOfferShop] = useState<string | null>(null);
   useEffect(() => {
     if (!shopifyInstall || installStarted.current || stores === null || oneClick === null) return;
     installStarted.current = true;
@@ -124,11 +124,19 @@ function Stores() {
       setResult({ kind: "error", text: "Shopify connections aren’t switched on yet. Please try again later." });
       return;
     }
-    setResult({ kind: "wait", text: `Connecting ${shopifyInstall}…` });
-    startConnect("shopify", shopifyInstall)
-      .then(({ authorize_url }) => { window.location.href = authorize_url; })
-      .catch((e) => setResult({ kind: "error", text: e instanceof ApiError ? e.message : "Couldn't start the Shopify connection." }));
+    setOfferShop(shopifyInstall);
   }, [shopifyInstall, stores, oneClick]);
+
+  async function connectOffered() {
+    if (!offerShop) return;
+    setResult({ kind: "wait", text: `Connecting ${offerShop}…` });
+    try {
+      const { authorize_url } = await startConnect("shopify", offerShop);
+      window.location.href = authorize_url;
+    } catch (e) {
+      setResult({ kind: "error", text: e instanceof ApiError ? e.message : "Couldn't start the Shopify connection." });
+    }
+  }
 
   // Back from Shopify / WordPress: wait for the connection to be confirmed.
   useEffect(() => {
@@ -144,6 +152,20 @@ function Stores() {
     let stop = false;
     let tries = 0;
     setResult({ kind: "wait", text: "Finishing the connection…" });
+    // Shopify: finish with the one-time code Shopify's return brought in the #fragment, then forget it.
+    const confirm = new URLSearchParams(window.location.hash.slice(1)).get("confirm");
+    if (confirm) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    async function start() {
+      if (confirm) {
+        try {
+          await confirmConnect(returning as string, confirm);
+        } catch (e) {
+          if (!stop) setResult({ kind: "error", text: e instanceof ApiError ? e.message : "The connection didn't go through. Please try again." });
+          return;
+        }
+      }
+      poll();
+    }
     async function poll() {
       try {
         const r = await getConnectRequest(returning as string);
@@ -166,7 +188,7 @@ function Stores() {
       }
       window.setTimeout(() => { if (!stop) poll(); }, 1500);
     }
-    poll();
+    start();
     return () => { stop = true; };
   }, [returning, expired, denied, load]);
 
@@ -190,6 +212,13 @@ function Stores() {
       </div>
 
       {error && <div className="alert alert-error" role="alert">{error}</div>}
+      {offerShop && !result && (
+        <div className="alert alert-info" role="status" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span>Connect your Shopify store <b>{offerShop}</b> to Listing Agent?</span>
+          <button type="button" className="btn btn-primary btn-sm" onClick={connectOffered}>Connect {offerShop.split(".")[0]}</button>
+          <button type="button" className="link-btn small" onClick={() => { setOfferShop(null); window.history.replaceState(null, "", "/stores"); }}>Not now</button>
+        </div>
+      )}
       {result && (
         <div className={`alert alert-${result.kind === "wait" ? "info" : result.kind}`} role={result.kind === "error" ? "alert" : "status"}
           style={result.kind === "wait" ? { display: "flex", gap: 10, alignItems: "center" } : undefined}>
@@ -217,8 +246,10 @@ function Stores() {
 
       <h2 className="display" style={{ fontWeight: 800, fontSize: 24, marginTop: 8 }}>Connect a store</h2>
       <div className="connect-grid">
-        {(["woocommerce", "shopify", "daraz", "custom"] as const).map((p) => (
-          <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load} />
+        {/* Inside the Shopify admin this shop is already connected, so no Shopify card there. */}
+        {(["woocommerce", "shopify", "daraz", "custom"] as const).filter((p) => !(p === "shopify" && isEmbedded())).map((p) => (
+          <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load}
+            appStoreUrl={p === "shopify" ? oneClick?.shopify_app_store_url ?? null : null} />
         ))}
         <EbayCard available={oneClick ? Boolean(oneClick.ebay) : null} marketplaces={oneClick?.ebay_marketplaces ?? []} />
       </div>
@@ -230,8 +261,8 @@ function Stores() {
   );
 }
 
-function OneClickCard({ platform, available, onConnected }: {
-  platform: OneClick; available: boolean | null; onConnected: () => void;
+function OneClickCard({ platform, available, onConnected, appStoreUrl = null }: {
+  platform: OneClick; available: boolean | null; onConnected: () => void; appStoreUrl?: string | null;
 }) {
   const cfg = ONE_CLICK[platform];
   const [store, setStore] = useState("");
@@ -257,7 +288,12 @@ function OneClickCard({ platform, available, onConnected }: {
   return (
     <section className="card">
       <div className="display">{PLATFORM_NAMES[platform]}</div>
-      {available !== false && (
+      {appStoreUrl && available !== false ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p className="small muted">Install Listing Agent from the Shopify App Store — it opens right inside your Shopify admin, already connected.</p>
+          <a className="btn btn-primary" href={appStoreUrl} target="_blank" rel="noopener noreferrer">Get it on the Shopify App Store</a>
+        </div>
+      ) : available !== false && (
         <form onSubmit={go} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <p className="small muted">{cfg.intro}</p>
           {!cfg.noInput && <label className="field">{cfg.label}

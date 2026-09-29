@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { CoinIcon, GearIcon, CloseIcon, GridIcon, LogoMark, LogoutIcon, MenuIcon, PlusIcon, StoreIcon } from "@/components/Icons";
-import { clearSession, getCredits, getSession, type User } from "@/lib/api";
+import { ApiError, clearSession, embeddedShop, embeddedSignIn, getCredits, getSession, isEmbedded, type User } from "@/lib/api";
 import { SessionContext } from "@/lib/session";
 
 const NAV = [
@@ -21,6 +21,8 @@ export default function SellerLayout({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [credits, setCredits] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [embedded, setEmbedded] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   const refreshCredits = useCallback(async () => {
     try {
@@ -33,18 +35,33 @@ export default function SellerLayout({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const session = getSession();
-    if (!session) {
-      router.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
-      return;
-    }
-    setUser(session.user);
-    // Right after sign-up the free credits arrive a moment later (billing gets them by event).
     let retry: number | undefined;
-    refreshCredits().then((c) => {
-      if (c && c.balance === 0 && c.history.length === 0) retry = window.setTimeout(refreshCredits, 1500);
-    });
-    return () => window.clearTimeout(retry);
+    let cancelled = false;
+    function start(u: User) {
+      if (cancelled) return;
+      setUser(u);
+      // Right after sign-up the free credits arrive a moment later (billing gets them by event).
+      refreshCredits().then((c) => {
+        if (c && c.balance === 0 && c.history.length === 0) retry = window.setTimeout(refreshCredits, 1500);
+      });
+    }
+    if (isEmbedded()) {
+      // Inside the Shopify admin: Shopify vouches for the merchant — no Listing Agent login page.
+      setEmbedded(true);
+      const s = getSession();
+      if (s) start(s.user);
+      else embeddedSignIn().then(start).catch((e) => {
+        if (!cancelled) setSignInError(e instanceof ApiError ? e.message : "Couldn't sign you in. Reload the app.");
+      });
+    } else {
+      const session = getSession();
+      if (!session) {
+        router.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search + window.location.hash)}`);
+        return;
+      }
+      start(session.user);
+    }
+    return () => { cancelled = true; window.clearTimeout(retry); };
   }, [router, refreshCredits]);
 
   useEffect(() => setMenuOpen(false), [pathname]);
@@ -54,6 +71,13 @@ export default function SellerLayout({ children }: { children: ReactNode }) {
     router.replace("/login");
   }
 
+  if (!user && signInError) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div className="alert alert-error" role="alert" style={{ maxWidth: 480 }}>{signInError}</div>
+      </div>
+    );
+  }
   if (!user) {
     return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}><span className="spinner" /></div>;
   }
@@ -96,8 +120,9 @@ export default function SellerLayout({ children }: { children: ReactNode }) {
             <Link href="/credits">Buy more</Link>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span className="side-user" title={user.email}>{user.full_name || user.email}</span>
-            <nav className="nav"><button type="button" onClick={signOut}><LogoutIcon />Sign out</button></nav>
+            <span className="side-user" title={embedded ? embeddedShop() ?? user.email : user.email}>{user.full_name || user.email}</span>
+            {/* Inside Shopify the merchant is signed in by Shopify itself; there's nothing to sign out of. */}
+            {!embedded && <nav className="nav"><button type="button" onClick={signOut}><LogoutIcon />Sign out</button></nav>}
           </div>
         </aside>
 

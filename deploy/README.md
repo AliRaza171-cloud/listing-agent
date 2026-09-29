@@ -103,22 +103,37 @@ Then open your Vercel site, sign up, and you're live.
 
 - **WooCommerce:** nothing to do — sellers enter their shop address, approve in WordPress, done.
   (Their WordPress needs "pretty" permalinks, i.e. anything except *Plain*.)
-- **Shopify (one time, by you):** in the **Shopify Dev Dashboard** (dev.shopify.com, free) create an app
-  "Listing Agent":
-  - **App URL:** `https://listingagent.duckdns.org/api/store/shopify/install` — where merchants land after
-    clicking Install in the Shopify App Store (or opening the app in their admin). Listing Agent checks
-    Shopify's signature, signs them in (or up) and connects their shop by itself.
-  - **Redirect URL:** `https://listingagent.duckdns.org/api/store/connect/shopify/callback`
-  - **Scopes:** `write_products, read_locations, write_inventory, write_publications`
-  - Copy its **Client ID** and **Client secret** into `.env` as `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`,
-    then `bash deploy/update.sh`.
-  - **Webhooks (required for Shopify's review):** in the app's settings, set the **compliance webhooks**
-    (customers/data_request, customers/redact, shop/redact) and an **app/uninstalled** subscription, all to
-    `https://listingagent.duckdns.org/api/store/shopify/webhooks`. Listing Agent checks Shopify's signature on each.
-  - **Privacy policy URL:** `https://<your-vercel-site>/privacy` (set `NEXT_PUBLIC_CONTACT_EMAIL` on Vercel first).
-  - To let *any* Shopify store install it, the app must use **public distribution** (Shopify reviews public
-    apps). Until then, Shopify lets you install it on stores you pick (custom distribution), and sellers can
-    still use "Advanced: connect with API keys".
+- **Shopify: Listing Agent as a public Shopify app** (one time, by you). Merchants install it from the
+  Shopify App Store; it opens *inside* their Shopify admin, signs them in by itself (one Listing Agent
+  account per shop) and they buy credits through their Shopify bill (Shopify requires that).
+  1. **dev.shopify.com → Apps → Create app** "Listing Agent" (a new app — keep any test app you have).
+  2. In the app's **version / configuration**:
+     - **App URL:** `https://www.yourdomain.com` (your website — not the API). **Embed app in Shopify admin:** on.
+     - **Use legacy install flow:** off (Shopify installs the app; Listing Agent then swaps Shopify's ID token for
+       an access token — this only works with Shopify's own install).
+     - **Scopes:** `write_products, read_locations, write_inventory, write_publications`
+     - **Redirect URL:** `https://api.yourdomain.com/api/store/connect/shopify/callback` (the Connect button on your website)
+     - **Webhooks** (API version 2026-07): the compliance topics `customers/data_request`, `customers/redact`,
+       `shop/redact`, and `app/uninstalled` — all to `https://api.yourdomain.com/api/store/shopify/webhooks`
+     - **Release** the version.
+  3. Server `.env`: `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` (from the app's Settings), and while Shopify
+     reviews the app `SHOPIFY_TEST_CHARGES=true`. Then `bash deploy/update.sh`.
+  4. Vercel → Environment Variables: `NEXT_PUBLIC_SHOPIFY_API_KEY` = the same Client ID → **Redeploy**.
+  5. Test: Dev Dashboard → your app → **Test on development store** (or install it on your own store). It should
+     open inside the Shopify admin, already signed in, with the store listed under Stores. On Credits, "Buy with
+     Shopify" makes a test charge on a development store.
+  6. **Distribution → Public distribution**, fill in the listing (screenshots, support email, privacy policy
+     `https://www.yourdomain.com/privacy`, pricing: "Free to install · credit packs from $4, one-time charges"),
+     a short **screencast** (install → a listing → publish → buy credits) and **submit for review**. Reviewers use
+     a development store, so they don't need a login.
+  7. When approved: `SHOPIFY_TEST_CHARGES=false` and `SHOPIFY_APP_STORE_URL=<the app's App Store page>` in `.env`,
+     then `bash deploy/update.sh`. The Stores page on your website then sends Shopify sellers to the App Store.
+  - The Connect button on your own website still works: after Shopify, the seller lands back on Stores and the
+    connection is finished only by the Listing Agent account that pressed Connect (so a Connect link someone
+    else sends can't attach a shop to their account).
+  - Tokens: Listing Agent uses Shopify's expiring tokens (required for new public apps): 1 hour, renewed
+    automatically; if a shop isn't used for ~90 days, opening the app in Shopify renews them.
+  - Shops connected with their own app's keys ("Advanced") keep working as before; they just can't pay through Shopify.
 
 ## 5c. Daraz
 
