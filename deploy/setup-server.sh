@@ -35,6 +35,11 @@ else
   echo "==> Firewall: only SSH, HTTP and HTTPS"
   apt-get install -y ufw
   ufw allow OpenSSH
+  # Also keep any extra SSH port open (e.g. "Port 2222" when an internet provider blocks port 22),
+  # so enabling the firewall never locks you out.
+  for p in $(grep -hE '^\s*Port\s+[0-9]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | sort -u); do
+    ufw allow "$p/tcp"
+  done
   ufw allow 80/tcp
   ufw allow 443/tcp
   ufw --force enable
