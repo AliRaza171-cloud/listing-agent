@@ -11,7 +11,9 @@ fi
 
 read -rp "API address (e.g. listingagent.duckdns.org, no https://): " API_DOMAIN
 read -rp "Website address (e.g. https://listing-agent.vercel.app): " APP_URL
-read -rsp "Gemini API key (hidden while typing): " GEMINI; echo
+read -rp "AI provider — gemini or openai [openai]: " AI_PROVIDER; AI_PROVIDER="${AI_PROVIDER:-openai}"
+case "$AI_PROVIDER" in gemini|openai) ;; *) echo "Type gemini or openai"; exit 1 ;; esac
+read -rsp "$AI_PROVIDER API key (hidden while typing): " AI_KEY; echo
 
 API_DOMAIN="${API_DOMAIN#https://}"; API_DOMAIN="${API_DOMAIN%/}"
 APP_URL="${APP_URL%/}"
@@ -43,14 +45,15 @@ set_kv API_DOMAIN "$API_DOMAIN"
 set_kv PUBLIC_BASE_URL "https://$API_DOMAIN"
 set_kv APP_URL "$APP_URL"
 set_kv ALLOWED_ORIGINS "[\"$APP_URL\"]"
-set_kv AI_PROVIDER gemini
-set_kv AI_API_KEY "$GEMINI"
-set_kv STT_PROVIDER gemini
-set_kv STT_API_KEY "$GEMINI"
+set_kv AI_PROVIDER "$AI_PROVIDER"
+set_kv AI_API_KEY "$AI_KEY"
+set_kv STT_PROVIDER "$AI_PROVIDER"
+set_kv STT_API_KEY "$AI_KEY"
+if [ "$AI_PROVIDER" = openai ]; then set_kv AI_MODEL gpt-5-mini; set_kv STT_MODEL gpt-4o-mini-transcribe; fi
 chmod 600 .env
 
 echo
 echo ".env created with new random secrets."
-echo "Now add your payment keys:  nano .env   (STRIPE_* and SAFEPAY_* lines)"
+echo "Now add your other keys:  nano .env   (STRIPE_*, SAFEPAY_*, and later SHOPIFY_*, DARAZ_*, EBAY_*)"
 echo "IMPORTANT: back up the CREDENTIALS_ENCRYPTION_KEY line somewhere safe — losing it"
 echo "makes every saved store connection unreadable."
