@@ -1,5 +1,6 @@
 from app.connectors.base import ConnectorError, StoreConnector
 from app.connectors.custom import CustomStoreConnector
+from app.connectors.daraz import DarazConnector
 from app.connectors.shopify import ShopifyConnector
 from app.connectors.woocommerce import WooCommerceConnector
 
@@ -8,6 +9,7 @@ _REGISTRY: dict[str, type[StoreConnector]] = {
     "custom": CustomStoreConnector,
     "woocommerce": WooCommerceConnector,
     "shopify": ShopifyConnector,
+    "daraz": DarazConnector,
 }
 
 

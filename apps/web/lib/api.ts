@@ -61,6 +61,10 @@ export type Product = {
   stock: number | null;
   sku: string | null;
   free_shipping: boolean;
+  weight_kg?: number | null;     // package for delivery (Daraz requires it)
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
   last_error: string | null;
   images: string[];
   listings: Listing[];
@@ -70,7 +74,7 @@ export type Product = {
 
 export type Store = {
   id: string;
-  platform: "shopify" | "woocommerce" | "custom";
+  platform: "shopify" | "woocommerce" | "custom" | "daraz";
   name: string;
   store_url: string;
   status: "active" | "error" | "disconnected";
@@ -253,7 +257,7 @@ export type Batch = {
 export const createBatch = (name: string) => api<Batch>("catalog/batches", { method: "POST", json: { name } });
 export const listBatches = () => api<Batch[]>("catalog/batches");
 export const updateProduct = (id: string, patch: Partial<Pick<Product,
-  "seller_notes" | "price" | "discount_pct" | "stock" | "sku" | "free_shipping">>) =>
+  "seller_notes" | "price" | "discount_pct" | "stock" | "sku" | "free_shipping" | "weight_kg" | "length_cm" | "width_cm" | "height_cm">>) =>
   api<Product>(`catalog/products/${id}`, { method: "PATCH", json: patch });
 export const deleteProduct = (id: string) => api<void>(`catalog/products/${id}`, { method: "DELETE" });
 export const updateListing = (productId: string, listingId: string,
@@ -287,8 +291,8 @@ export type ConnectRequest = {
   id: string; platform: Store["platform"]; status: "pending" | "connected" | "failed";
   error: string | null; store_url: string; name: string;
 };
-export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean; custom?: boolean }>("store/connect/options");
-export const startConnect = (platform: "shopify" | "woocommerce" | "custom", store: string, name?: string) =>
+export const getConnectOptions = () => api<{ shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean }>("store/connect/options");
+export const startConnect = (platform: "shopify" | "woocommerce" | "custom" | "daraz", store: string, name?: string) =>
   api<{ request_id: string; authorize_url: string }>(`store/connect/${platform}`, {
     method: "POST", json: { store, name: name || null },
   });

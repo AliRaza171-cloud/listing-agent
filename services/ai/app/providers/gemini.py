@@ -273,7 +273,7 @@ class GeminiListingAI:
             "publish=true only if they ask to publish/upload/send/put the product on their store(s) "
             "(e.g. 'Shopify pe publish karo', 'sab stores pe daal do', 'upload to woo and smart click'). "
             "publish_to: the stores they named, copied from this list by name, or the platform word they used "
-            "(shopify / woocommerce / custom), or [\"all\"] for all/sab/everywhere/dono; [] if they didn't name any. "
+            "(shopify / woocommerce / daraz / custom), or [\"all\"] for all/sab/everywhere/dono; [] if they didn't name any. "
             "publish_mode: 'live' if they say live/visible/active/show it, 'draft' if they say draft/hidden; else null. "
             "publish_language: 'ur' if they want the Urdu listing, 'en' for English; else null.\n"
             f"The seller's stores: {store_list}\n\n"

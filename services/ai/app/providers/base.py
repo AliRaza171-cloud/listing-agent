@@ -84,6 +84,7 @@ PLATFORM_WORDS = {
     "shopify": {"shopify"},
     "woocommerce": {"woocommerce", "woo", "wordpress", "wp", "woo commerce"},
     "custom": {"custom", "custom store", "smart click", "smartclick", "my website", "website"},
+    "daraz": {"daraz", "daraz pk", "daraz.pk"},
 }
 
 

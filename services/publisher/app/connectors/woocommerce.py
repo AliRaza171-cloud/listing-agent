@@ -151,6 +151,11 @@ class WooCommerceConnector:
         if p.stock is not None:
             body["manage_stock"] = True
             body["stock_quantity"] = p.stock
+        # Package for shipping rates (WooCommerce uses the store's own units; kg/cm are its defaults)
+        if p.weight_kg:
+            body["weight"] = f"{p.weight_kg:g}"
+        if p.length_cm and p.width_cm and p.height_cm:
+            body["dimensions"] = {"length": f"{p.length_cm:g}", "width": f"{p.width_cm:g}", "height": f"{p.height_cm:g}"}
         if p.category_name:
             wanted = p.category_name.strip().lower()
             match = next((c for c in await self.list_categories() if c.name.strip().lower() == wanted), None)

@@ -264,7 +264,7 @@ function ListingEditor({ product, stores, onSaved, onNotice, onRegenerated }: {
       const platforms = Array.from(new Set(product.listings.map((l) => l.platform).filter((p): p is NonNullable<typeof p> => !!p)));
       await generateListing(product.id, {
         languages: langs, platforms, research: product.listings.length === 0 || (!!product.research && product.research.mode !== "skipped"),
-        store_connection_ids: stores.filter((s) => s.status === "active" && platforms.includes(s.platform)).map((s) => s.id),
+        store_connection_ids: stores.filter((s) => s.status === "active" && (platforms as string[]).includes(s.platform)).map((s) => s.id),
       });
       onNotice(null);
       onRegenerated();
@@ -601,10 +601,11 @@ function DetailsCard({ product, onSaved, onNotice }: { product: Product; onSaved
   const fromProduct = useCallback((p: Product) => ({
     price: p.price?.toString() ?? "", discount: p.discount_pct?.toString() ?? "",
     stock: p.stock?.toString() ?? "", sku: p.sku ?? "", free: p.free_shipping,
+    weight: p.weight_kg?.toString() ?? "", size: p.length_cm && p.width_cm && p.height_cm ? `${p.length_cm} x ${p.width_cm} x ${p.height_cm}` : "",
   }), []);
   const [form, setForm] = useState(() => fromProduct(product));
   const [saving, setSaving] = useState(false);
-  const key = `${product.price}|${product.discount_pct}|${product.stock}|${product.sku}|${product.free_shipping}`;
+  const key = `${product.price}|${product.discount_pct}|${product.stock}|${product.sku}|${product.free_shipping}|${product.weight_kg}|${product.length_cm}|${product.width_cm}|${product.height_cm}`;
   useEffect(() => setForm(fromProduct(product)), [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dirty = JSON.stringify(form) !== JSON.stringify(fromProduct(product));
@@ -616,10 +617,19 @@ function DetailsCard({ product, onSaved, onNotice }: { product: Product; onSaved
     if (price !== null && (!Number.isFinite(price) || price <= 0)) return onNotice({ kind: "error", text: "Price must be more than 0." });
     if (discount !== null && (!Number.isInteger(discount) || discount < 1 || discount > 95)) return onNotice({ kind: "error", text: "Discount must be a whole number from 1 to 95." });
     if (stock !== null && (!Number.isInteger(stock) || stock < 0)) return onNotice({ kind: "error", text: "Stock must be a whole number." });
+    const weight = form.weight.trim() ? Number(form.weight) : null;
+    if (weight !== null && (!Number.isFinite(weight) || weight <= 0 || weight > 500)) return onNotice({ kind: "error", text: "Weight must be in kg, e.g. 0.8" });
+    let dims: number[] | null = null;
+    if (form.size.trim()) {
+      dims = form.size.split(/[x×*,\s]+/i).filter(Boolean).map(Number);
+      if (dims.length !== 3 || dims.some((d) => !Number.isFinite(d) || d <= 0 || d > 1000))
+        return onNotice({ kind: "error", text: "Size must be length x width x height in cm, e.g. 30 x 20 x 10" });
+    }
     setSaving(true);
     try {
       onSaved(await updateProduct(product.id, {
         price, discount_pct: discount, stock, sku: form.sku.trim() || null, free_shipping: form.free,
+        weight_kg: weight, length_cm: dims ? dims[0] : null, width_cm: dims ? dims[1] : null, height_cm: dims ? dims[2] : null,
       }));
       onNotice({ kind: "ok", text: "Details saved." });
     } catch (e) {
@@ -641,6 +651,8 @@ function DetailsCard({ product, onSaved, onNotice }: { product: Product; onSaved
         <label className="field">Discount %<input className="input" inputMode="numeric" value={form.discount} onChange={(e) => setForm({ ...form, discount: e.target.value })} /></label>
         <label className="field">Stock<input className="input" inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></label>
         <label className="field">SKU<input className="input" placeholder="Optional" value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} /></label>
+        <label className="field">Package weight (kg)<input className="input" inputMode="decimal" placeholder="e.g. 0.8" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} /></label>
+        <label className="field">Package size (cm)<input className="input" placeholder="L x W x H" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} /></label>
       </div>
       <label className="check"><input type="checkbox" checked={form.free} onChange={(e) => setForm({ ...form, free: e.target.checked })} />Free shipping</label>
       {dirty && (

@@ -33,6 +33,10 @@ class ProductPatch(BaseModel):
     stock: int | None = Field(default=None, ge=0)
     sku: str | None = None
     free_shipping: bool | None = None
+    weight_kg: Decimal | None = Field(default=None, gt=0, le=500)
+    length_cm: Decimal | None = Field(default=None, gt=0, le=1000)
+    width_cm: Decimal | None = Field(default=None, gt=0, le=1000)
+    height_cm: Decimal | None = Field(default=None, gt=0, le=1000)
 
 
 class GenerateIn(BaseModel):
@@ -62,6 +66,7 @@ def _serialize(p: Product) -> dict:
         "seller_notes": p.seller_notes, "detected": p.detected, "research": p.research,
         "price": float(p.price) if p.price is not None else None, "discount_pct": p.discount_pct,
         "stock": p.stock, "sku": p.sku, "free_shipping": p.free_shipping, "last_error": p.last_error,
+        **{k: (float(getattr(p, k)) if getattr(p, k) is not None else None) for k in ("weight_kg", "length_cm", "width_cm", "height_cm")},
         "images": [i.url for i in p.images],
         "listings": [{
             "id": str(l.id), "language": l.language, "platform": l.platform, "title": l.title,
@@ -270,6 +275,10 @@ async def publish(product_id: uuid.UUID, data: PublishIn,
                 "image_urls": [i.url for i in product.images], "tags": generic.tags, "category_id": None,
                 "category_name": generic.category_suggestion,
                 "seo_title": generic.seo_title, "meta_description": generic.meta_description,
+                "brand": (product.detected or {}).get("brand"),
+                "attributes": (product.detected or {}).get("attributes") or {},
+                **{k: (float(getattr(product, k)) if getattr(product, k) is not None else None)
+                   for k in ("weight_kg", "length_cm", "width_cm", "height_cm")},
             },
         })
     return {"publishing_to": [str(s) for _, s in jobs]}

@@ -12,7 +12,8 @@ type Field = { key: string; label: string; placeholder: string; secret?: boolean
 
 // Manual (API key) forms. For Shopify and WooCommerce these sit under "Advanced" — most sellers
 // use the one-click Connect button instead.
-const FORMS: Record<Platform, {
+type KeyPlatform = Exclude<Platform, "daraz">;   // Daraz connects only through its own login
+const FORMS: Record<KeyPlatform, {
   intro: string; urlLabel: string; urlPlaceholder: string; fields: Field[];
   ready?: (creds: Record<string, string>) => boolean;
 }> = {
@@ -47,8 +48,8 @@ const FORMS: Record<Platform, {
   },
 };
 
-type OneClick = "shopify" | "woocommerce" | "custom";
-const ONE_CLICK: Record<OneClick, { intro: string; label: string; placeholder: string; suffix?: string }> = {
+type OneClick = "shopify" | "woocommerce" | "custom" | "daraz";
+const ONE_CLICK: Record<OneClick, { intro: string; label: string; placeholder: string; suffix?: string; noInput?: boolean }> = {
   woocommerce: {
     intro: "Enter your shop’s address. You’ll log in to your WordPress and click Approve — that’s it.",
     label: "Your shop’s address",
@@ -59,6 +60,10 @@ const ONE_CLICK: Record<OneClick, { intro: string; label: string; placeholder: s
     label: "Your Shopify store name",
     placeholder: "yourstore",
     suffix: ".myshopify.com",
+  },
+  daraz: {
+    intro: "Log in to your Daraz Seller Center and click Authorize — that’s it. Daraz checks new products (quality control) before they show in your shop.",
+    label: "", placeholder: "", noInput: true,
   },
   custom: {
     intro: "Smart Click and other sites that support Listing Agent. Enter your website’s address — you’ll log in as the store’s admin and click Approve.",
@@ -80,7 +85,7 @@ function Stores() {
 
   const [stores, setStores] = useState<Store[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [oneClick, setOneClick] = useState<{ shopify: boolean; woocommerce: boolean; custom?: boolean } | null>(null);
+  const [oneClick, setOneClick] = useState<{ shopify: boolean; woocommerce: boolean; custom?: boolean; daraz?: boolean } | null>(null);
   const [result, setResult] = useState<{ kind: "ok" | "error" | "wait"; text: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -93,7 +98,7 @@ function Stores() {
 
   useEffect(() => {
     load();
-    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false }));
+    getConnectOptions().then(setOneClick).catch(() => setOneClick({ shopify: false, woocommerce: false, custom: false, daraz: false }));
   }, [load]);
 
   // Back from Shopify / WordPress: wait for the connection to be confirmed.
@@ -183,7 +188,7 @@ function Stores() {
 
       <h2 className="display" style={{ fontWeight: 800, fontSize: 24, marginTop: 8 }}>Connect a store</h2>
       <div className="connect-grid">
-        {(["woocommerce", "shopify", "custom"] as const).map((p) => (
+        {(["woocommerce", "shopify", "daraz", "custom"] as const).map((p) => (
           <OneClickCard key={p} platform={p} available={oneClick ? Boolean(oneClick[p]) : null} onConnected={load} />
         ))}
       </div>
@@ -203,7 +208,8 @@ function OneClickCard({ platform, available, onConnected }: {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
-  const showManual = advanced || available === false;
+  const keyPlatform = platform === "daraz" ? null : platform;
+  const showManual = keyPlatform !== null && (advanced || available === false);
 
   async function go(e: FormEvent) {
     e.preventDefault();
@@ -224,35 +230,39 @@ function OneClickCard({ platform, available, onConnected }: {
       {available !== false && (
         <form onSubmit={go} autoComplete="off" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <p className="small muted">{cfg.intro}</p>
-          <label className="field">{cfg.label}
+          {!cfg.noInput && <label className="field">{cfg.label}
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <input className="input" name={`${platform}-shop`} value={store} placeholder={cfg.placeholder} inputMode="url" autoComplete="off"
                 onChange={(e) => setStore(e.target.value)} style={{ flex: 1 }} />
               {cfg.suffix && <span className="small muted">{cfg.suffix}</span>}
             </span>
-          </label>
+          </label>}
           {msg && <div className="alert alert-error" role="alert">{msg}</div>}
-          <button className="btn btn-primary" disabled={busy || !store.trim() || available === null}>
-            {busy && <span className="spinner" />}{platform === "custom" ? "Connect my store" : `Connect with ${PLATFORM_NAMES[platform]}`}
+          <button className="btn btn-primary" disabled={busy || (!cfg.noInput && !store.trim()) || available === null}>
+            {busy && <span className="spinner" />}{platform === "custom" ? "Connect my store" : platform === "daraz" ? "Connect Daraz" : `Connect with ${PLATFORM_NAMES[platform]}`}
           </button>
         </form>
       )}
-      {available === false && (
+      {available === false && (keyPlatform ? (
         <p className="small muted">
           One-click connect for {PLATFORM_NAMES[platform]} works once Listing Agent is online (it needs a secure https address). For now, use API keys:
         </p>
-      )}
-      {available !== false && (
+      ) : (
+        <p className="small muted">
+          Daraz connect works once Listing Agent is online and registered with Daraz (open.daraz.com). Daraz has no API-key option.
+        </p>
+      ))}
+      {available !== false && keyPlatform && (
         <button type="button" className="link-btn small" style={{ alignSelf: "flex-start" }} onClick={() => setAdvanced(!advanced)}>
           {advanced ? "Hide advanced" : "Advanced: connect with API keys"}
         </button>
       )}
-      {showManual && <ManualForm platform={platform} onConnected={onConnected} />}
+      {showManual && keyPlatform && <ManualForm platform={keyPlatform} onConnected={onConnected} />}
     </section>
   );
 }
 
-function ManualForm({ platform, onConnected }: { platform: Platform; onConnected: () => void }) {
+function ManualForm({ platform, onConnected }: { platform: KeyPlatform; onConnected: () => void }) {
   const cfg = FORMS[platform];
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");

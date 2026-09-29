@@ -68,7 +68,11 @@ async def _store_credentials(store_id: str, user_id: str) -> dict:
     r = await _http.get(f"{settings.STORE_URL}/internal/stores/{store_id}/credentials",
                         params={"user_id": user_id}, headers=outgoing_headers(settings.INTERNAL_TOKEN))
     if r.status_code in (404, 409):
-        raise ConnectorError("This store is no longer connected.")
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = None
+        raise ConnectorError(detail if r.status_code == 409 and isinstance(detail, str) else "This store is no longer connected.")
     r.raise_for_status()
     return r.json()
 

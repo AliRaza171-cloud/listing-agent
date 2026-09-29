@@ -41,6 +41,13 @@ class ProductPayload:
     seo_title: str | None = None
     meta_description: str | None = None
     publish_live: bool = False     # False = create as draft (safe default)
+    brand: str | None = None       # from what the AI saw in the photos
+    attributes: dict = field(default_factory=dict)   # e.g. {"color": "black", "power": "2200W"} (AI-detected)
+    # Package for delivery (Daraz requires these; WooCommerce uses them for shipping rates)
+    weight_kg: float | None = None
+    length_cm: float | None = None
+    width_cm: float | None = None
+    height_cm: float | None = None
     image_files: list[ImageFile] = field(default_factory=list)  # photo bytes, loaded by publisher
 
 

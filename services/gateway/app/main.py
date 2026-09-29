@@ -57,6 +57,7 @@ PUBLIC = {
     # one-click store connections: WooCommerce posts keys here, Shopify sends the seller back here;
     # the store service only accepts them for a pending, one-time connect request
     ("store", "POST", "connect/woocommerce/callback"), ("store", "GET", "connect/shopify/callback"),
+    ("store", "GET", "connect/daraz/callback"),
     ("store", "POST", "shopify/webhooks"),   # verified with Shopify's HMAC header
     ("store", "POST", "connect/custom/callback"),  # Smart Click etc. send the approved key here
 }

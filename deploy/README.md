@@ -115,6 +115,17 @@ Then open your Vercel site, sign up, and you're live.
     apps). Until then, Shopify lets you install it on stores you pick (custom distribution), and sellers can
     still use "Advanced: connect with API keys".
 
+## 5c. Daraz
+
+1. Developer account at **open.daraz.com** (Daraz approves it — ID and app description needed).
+2. App Console → create app "Listing Agent", **Callback URL:**
+   `https://listingagent.duckdns.org/api/store/connect/daraz/callback`
+3. Copy **App Key** and **App Secret** into `.env` as `DARAZ_APP_KEY` / `DARAZ_APP_SECRET`, then `bash deploy/update.sh`.
+4. Sellers press **Connect Daraz** on the Stores page, log in to Seller Center and click Authorize.
+   Access renews itself for 180 days; after that they press Connect again.
+5. Daraz needs a **package weight and size** on each product (Your details) and checks new products (QC)
+   before they show in the shop.
+
 ## 6. Backups (once)
 
 ```bash

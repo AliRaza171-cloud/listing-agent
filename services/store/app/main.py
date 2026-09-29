@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
+from lagent_common import daraz
 from lagent_common.correlation import outgoing_headers
 from lagent_common.db import make_db
 from lagent_common.internal import current_user_id, require_internal
@@ -52,6 +53,12 @@ class Settings(BaseSettings):
     # Inside Docker "localhost" is this container; a store running on your own PC is reached
     # through this name instead (same as the publisher). Empty on a server.
     STORE_LOCALHOST_ALIAS: str = ""
+    # Listing Agent's Daraz app (open.daraz.com, app console). Empty = Daraz button hidden.
+    DARAZ_APP_KEY: str = ""
+    DARAZ_APP_SECRET: str = ""
+    DARAZ_API_URL: str = daraz.API_URL
+    DARAZ_AUTH_URL: str = daraz.AUTH_URL
+    DARAZ_AUTH_PAGE: str = daraz.AUTH_PAGE
 
     @property
     def api_base(self) -> str:
@@ -84,7 +91,7 @@ class StoreConnection(Base):
     __table_args__ = (UniqueConstraint("user_id", "platform", "store_url"),)
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), nullable=False)
-    platform = Column(Enum("custom", "woocommerce", "shopify", name="store_platform", create_type=False), nullable=False)
+    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", name="store_platform", create_type=False), nullable=False)
     name = Column(String, nullable=False)
     store_url = Column(String, nullable=False)
     credentials_encrypted = Column(String, nullable=False)
@@ -99,7 +106,7 @@ class ConnectRequest(Base):
     __tablename__ = "connect_requests"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), nullable=False)
-    platform = Column(Enum("custom", "woocommerce", "shopify", name="store_platform", create_type=False), nullable=False)
+    platform = Column(Enum("custom", "woocommerce", "shopify", "daraz", name="store_platform", create_type=False), nullable=False)
     name = Column(String, nullable=False)
     store_url = Column(String, nullable=False)
     status = Column(String, default="pending", nullable=False)
@@ -194,7 +201,7 @@ SHOP_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$")
 
 
 class StartIn(BaseModel):
-    store: str = Field(min_length=3, max_length=300)   # WooCommerce site address, or Shopify store name
+    store: str = Field(default="", max_length=300)   # WooCommerce site address or Shopify store name (not used for Daraz)
     name: str | None = Field(default=None, max_length=80)
 
 
@@ -251,7 +258,8 @@ def connect_options():
     # Listing Agent online (PUBLIC_BASE_URL). On a PC, sellers use API keys instead.
     online = settings.api_base.lower().startswith("https://")
     return {"shopify": bool(settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET) and online,
-            "woocommerce": online, "custom": True}
+            "woocommerce": online, "custom": True,
+            "daraz": bool(settings.DARAZ_APP_KEY and settings.DARAZ_APP_SECRET) and online}
 
 
 def _reachable(url: str) -> str:
@@ -430,6 +438,86 @@ async def shopify_callback(request: Request, db: Session = Depends(get_db)):
     return RedirectResponse(back, status_code=303)
 
 
+# ---------------------------------------------------------------- Daraz
+
+def _daraz() -> daraz.DarazClient:
+    return daraz.DarazClient(settings.DARAZ_APP_KEY, settings.DARAZ_APP_SECRET, api_url=settings.DARAZ_API_URL,
+                             auth_url=settings.DARAZ_AUTH_URL, http=_http)
+
+
+@router.post("/connect/daraz")
+def start_daraz(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    """Daraz seller login: the seller signs in to Daraz Seller Center and clicks Authorize."""
+    if not (settings.DARAZ_APP_KEY and settings.DARAZ_APP_SECRET):
+        raise HTTPException(503, "Daraz connections aren't set up on this server yet.")
+    req = _new_request(db, user_id, "daraz", (data.name or "").strip() or "Daraz shop", "https://www.daraz.pk")
+    url = daraz.authorize_url(settings.DARAZ_APP_KEY, f"{settings.api_base}/api/store/connect/daraz/callback",
+                              str(req.id), settings.DARAZ_AUTH_PAGE)
+    return {"request_id": str(req.id), "authorize_url": url}
+
+
+@router.get("/connect/daraz/callback")
+async def daraz_callback(request: Request, db: Session = Depends(get_db)):
+    """Public (the seller's browser comes back here from Daraz with ?code=…&state=…)."""
+    params = dict(request.query_params)
+    app_url = settings.APP_URL.rstrip("/")
+    req = _open_request(db, params.get("state", ""), "daraz")
+    if req is None:
+        return RedirectResponse(f"{app_url}/stores?connect_error=expired", status_code=303)
+    back = f"{app_url}/stores?connect={req.id}"
+    if not params.get("code"):
+        _finish(db, req, error="The connection was cancelled in Daraz.")
+        return RedirectResponse(back + "&denied=1", status_code=303)
+    try:
+        tokens = await _daraz().create_token(params["code"])
+    except daraz.DarazError as exc:
+        _finish(db, req, error=f"Daraz didn't give access: {exc}")
+        return RedirectResponse(back, status_code=303)
+    creds = tokens.as_credentials()
+    # One connection per Daraz seller account.
+    store_url = f"https://www.daraz.pk/shop/{tokens.short_code}" if tokens.short_code \
+        else f"https://sellercenter.daraz.pk/?seller={tokens.seller_id or tokens.account}"
+    name = req.name if req.name != "Daraz shop" else (tokens.account or "Daraz shop")
+    try:
+        await _test("daraz", store_url, creds)
+    except ConnectionFailed as exc:
+        _finish(db, req, error=str(exc))
+        return RedirectResponse(back, status_code=303)
+    _finish(db, req, store=_save(db, req.user_id, "daraz", name, store_url, creds, replace=True))
+    return RedirectResponse(back, status_code=303)
+
+
+DARAZ_RENEW_DAYS = 5
+
+
+async def _fresh_daraz_credentials(db: Session, store: StoreConnection) -> dict:
+    """Daraz access lasts 30 days: renew it (with the 180-day refresh token) when fewer than
+    DARAZ_RENEW_DAYS remain, and save the new pair. When the refresh token is gone too, the
+    seller has to press Connect again."""
+    creds = decrypt_credentials(store.credentials_encrypted)
+    now = int(datetime.utcnow().timestamp())
+    if int(creds.get("expires_at") or 0) - now > DARAZ_RENEW_DAYS * 86400:
+        return creds
+    if int(creds.get("refresh_expires_at") or 0) <= now:
+        store.status, store.last_error = "error", "Daraz access expired — press Connect on Daraz again."
+        db.commit()
+        raise HTTPException(409, store.last_error)
+    try:
+        tokens = await _daraz().refresh_token(creds.get("refresh_token", ""))
+    except daraz.DarazError as exc:
+        if exc.retryable:
+            return creds   # still valid for a few days; try again next time
+        store.status, store.last_error = "error", "Daraz access expired — press Connect on Daraz again."
+        db.commit()
+        raise HTTPException(409, store.last_error)
+    new = {**creds, **{k: v for k, v in tokens.as_credentials().items() if v}}
+    store.credentials_encrypted = encrypt_credentials(new)
+    store.status, store.last_error = "active", None
+    db.commit()
+    log.info("renewed Daraz access for store %s", store.id)
+    return new
+
+
 # ---------------------------------------------------------------- Shopify webhooks
 # Configure in the Shopify Dev Dashboard (app version):
 #   Compliance webhooks (customers/data_request, customers/redact, shop/redact) and the
@@ -504,15 +592,16 @@ def disconnect_store(store_id: uuid.UUID, user_id: uuid.UUID = Depends(current_u
 
 
 @router.get("/internal/stores/{store_id}/credentials")
-def credentials_for_publisher(store_id: uuid.UUID, user_id: uuid.UUID = Query(...), db: Session = Depends(get_db)):
+async def credentials_for_publisher(store_id: uuid.UUID, user_id: uuid.UUID = Query(...), db: Session = Depends(get_db)):
     """Internal only (gateway never routes /internal). Checks the store belongs to the user."""
     store = db.get(StoreConnection, store_id)
     if not store or store.user_id != user_id:
         raise HTTPException(404, "Store not found.")
     if store.status == "disconnected":
         raise HTTPException(409, "Store is disconnected.")
-    return {"platform": store.platform, "store_url": store.store_url,
-            "credentials": decrypt_credentials(store.credentials_encrypted)}
+    creds = (await _fresh_daraz_credentials(db, store) if store.platform == "daraz"
+             else decrypt_credentials(store.credentials_encrypted))
+    return {"platform": store.platform, "store_url": store.store_url, "credentials": creds}
 
 
 app = create_service("store", routers=[router], engine=engine,
