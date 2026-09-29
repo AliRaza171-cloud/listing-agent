@@ -58,9 +58,9 @@ const ONE_CLICK: Record<OneClick, { intro: string; label: string; placeholder: s
     placeholder: "yourstore.com",
   },
   shopify: {
-    intro: "Enter your Shopify store name. You’ll log in to Shopify and click Install — that’s it.",
-    label: "Your Shopify store name",
-    placeholder: "yourstore",
+    intro: "Enter your store’s website (e.g. mybrand.com) or its Shopify name. You’ll log in to Shopify and click Install — that’s it.",
+    label: "Your store’s website or Shopify name",
+    placeholder: "mybrand.com or yourstore",
     suffix: ".myshopify.com",
   },
   daraz: {
@@ -369,7 +369,7 @@ function OneClickCard({ platform, available, onConnected, appStoreUrl = null, id
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <input className="input" name={`${platform}-shop`} value={store} placeholder={cfg.placeholder} inputMode="url" autoComplete="off"
                 onChange={(e) => setStore(e.target.value)} style={{ flex: 1 }} />
-              {cfg.suffix && <span className="small muted">{cfg.suffix}</span>}
+              {cfg.suffix && !store.includes(".") && store.trim() !== "" && <span className="small muted">{cfg.suffix}</span>}
             </span>
           </label>}
           {msg && <div className="alert alert-error" role="alert">{msg}</div>}

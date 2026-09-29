@@ -280,6 +280,24 @@ def _woo_url(raw: str) -> str:
     return url
 
 
+async def _shopify_from_address(raw: str) -> str:
+    """A store's own website (custom domain) -> its *.myshopify.com name, found from the public site."""
+    host = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
+    if "." not in host or host.endswith(".myshopify.com"):
+        return _shop_domain(raw)
+    try:
+        found = await detect.detect(raw, _http, allow_local=settings.ALLOW_HTTP_STORES, alias=settings.STORE_LOCALHOST_ALIAS)
+    except detect.DetectError as exc:
+        raise HTTPException(422, str(exc))
+    if found.platform != "shopify":
+        what = f" — it runs on {found.name}" if found.platform not in ("unknown",) else ""
+        raise HTTPException(422, f"{host} doesn't look like a Shopify store{what}. Try the “Your store’s address” box above.")
+    if not found.store:
+        raise HTTPException(422, "This is a Shopify store, but it hides its Shopify name. Enter it instead "
+                                 "(yourstore.myshopify.com) — the owner sees it in Shopify admin → Settings → Domains.")
+    return found.store
+
+
 def _shop_domain(raw: str) -> str:
     shop = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
     if "." not in shop:
@@ -444,11 +462,12 @@ async def woocommerce_callback(request: Request, db: Session = Depends(get_db)):
 # (Works whatever domains the website and API use — no cookies.)
 
 @router.post("/connect/shopify")
-def start_shopify(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
-    """Shopify OAuth: the seller approves Listing Agent's app in their Shopify admin."""
+async def start_shopify(data: StartIn, user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
+    """Shopify OAuth: the seller approves Listing Agent's app in their Shopify admin. They can type the
+    Shopify name (yourstore / yourstore.myshopify.com) or the store's own website (e.g. tentree.com)."""
     if not (settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET):
         raise HTTPException(503, "Shopify connections aren't set up on this server yet.")
-    shop = _shop_domain(data.store)
+    shop = await _shopify_from_address(data.store)
     req = _new_request(db, user_id, "shopify", (data.name or "").strip() or shop.split(".")[0], f"https://{shop}")
     query = urlencode({"client_id": settings.SHOPIFY_CLIENT_ID, "scope": settings.SHOPIFY_SCOPES,
                        "redirect_uri": f"{settings.api_base}/api/store/connect/shopify/callback", "state": str(req.id)})
