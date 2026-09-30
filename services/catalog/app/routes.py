@@ -12,7 +12,8 @@ from lagent_common.markets import Market
 from lagent_common.correlation import outgoing_headers
 from lagent_common.internal import current_user_id, require_internal
 
-from app.core import Batch, Listing, ListingJob, Product, ProductImage, ProductPublication, bus, get_db, settings
+from app.core import Batch, Listing, ListingJob, Product, ProductImage, bus, get_db, settings
+from app.publishing import PublishBlocked, check_publishable, mark_publications, send_publish_events
 
 router = APIRouter(dependencies=[Depends(require_internal)])
 _http = httpx.AsyncClient(timeout=15)
@@ -43,11 +44,19 @@ class ProductPatch(BaseModel):
     height_cm: Decimal | None = Field(default=None, gt=0, le=1000)
 
 
+class AutoPublishIn(BaseModel):
+    """Bulk upload only: publish to these stores as soon as the listing is written."""
+    store_connection_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
+    mode: str = Field(default="draft", pattern="^(draft|live)$")
+    language: str = Field(default="en", pattern="^(en|ur)$")
+
+
 class GenerateIn(BaseModel):
     languages: list[str] = ["en"]
     platforms: list[str] = []                 # empty = one generic listing
     research: bool = False
     store_connection_ids: list[uuid.UUID] = []  # stores whose categories the AI should pick from
+    auto_publish: AutoPublishIn | None = None
 
 
 class PublishIn(BaseModel):
@@ -83,6 +92,7 @@ def _serialize(p: Product) -> dict:
             "store_connection_id": str(x.store_connection_id), "status": x.status, "mode": x.mode,
             "external_url": x.external_url, "error": x.error,
         } for x in p.publications],
+        "auto_publish": p.auto_publish,
         "updated_at": p.updated_at.isoformat(),
     }
 
@@ -208,8 +218,12 @@ async def generate(product_id: uuid.UUID, data: GenerateIn,
     product = _own_product(db, product_id, user_id)
     if product.status == "generating":
         raise HTTPException(409, "A listing is already being written for this product.")
-    if not set(data.languages) <= LANGUAGES or not data.languages or not set(data.platforms) <= PLATFORMS:
-        raise HTTPException(422, "Unsupported language or platform.")
+    if not set(data.languages) <= LANGUAGES or not data.languages:
+        raise HTTPException(422, "Unsupported language.")
+    # Marketplaces (Daraz, eBay) take the general listing; only these get their own format.
+    platforms = [p for p in dict.fromkeys(data.platforms) if p in PLATFORMS]
+    if data.auto_publish is not None and product.batch_id is None:
+        raise HTTPException(422, "Automatic publishing is for bulk uploads.")
     if not product.images and not product.seller_notes:
         raise HTTPException(422, "Add at least one photo or some details first.")
 
@@ -233,14 +247,18 @@ async def generate(product_id: uuid.UUID, data: GenerateIn,
             categories += [c["name"] for c in r.json()]
 
     db.add(ListingJob(id=job_id, product_id=product.id, user_id=user_id, reservation_id=reservation_id,
-                      languages=data.languages, platforms=data.platforms))
+                      languages=data.languages, platforms=platforms))
     product.status, product.last_error = "generating", None
+    # Saved on the product so it survives the seller closing the page; used once, when the listing is ready.
+    product.auto_publish = ({**data.auto_publish.model_dump(mode="json"),
+                             "store_connection_ids": [str(x) for x in dict.fromkeys(data.auto_publish.store_connection_ids)]}
+                            if data.auto_publish else None)
     db.commit()
 
     await bus.publish("listing.requested", {
         "job_id": str(job_id), "product_id": str(product.id), "user_id": str(user_id),
         "reservation_id": reservation_id, "image_urls": [i.url for i in product.images],
-        "seller_notes": product.seller_notes, "languages": data.languages, "platforms": data.platforms,
+        "seller_notes": product.seller_notes, "languages": data.languages, "platforms": platforms,
         "research": data.research, "categories": sorted(set(categories)),
         "market": {"country": product.country or "PK", "currency": product.currency or "PKR"},
     })
@@ -252,42 +270,12 @@ async def publish(product_id: uuid.UUID, data: PublishIn,
                   user_id: uuid.UUID = Depends(current_user_id), db: Session = Depends(get_db)):
     """Saga 4.2: one publish.requested per store. Seller-only facts must be filled in first."""
     product = _own_product(db, product_id, user_id)
-    if product.status != "ready":
-        raise HTTPException(409, "Generate the listing first.")
-    if product.price is None:
-        raise HTTPException(422, "Set a price before publishing.")
-    listings = [l for l in product.listings if l.is_current and l.language == data.language]
-    if not listings:
-        raise HTTPException(422, f"No {data.language} listing to publish.")
-    generic = next((l for l in listings if l.platform is None), listings[0])
-
-    jobs = []
-    for store_id in data.store_connection_ids:
-        publish_job_id = uuid.uuid4()
-        pub = next((x for x in product.publications if x.store_connection_id == store_id), None)
-        if pub is None:
-            pub = ProductPublication(product_id=product.id, store_connection_id=store_id, publish_job_id=publish_job_id)
-            product.publications.append(pub)
-        pub.publish_job_id, pub.status, pub.mode, pub.error = publish_job_id, "publishing", data.mode, None
-        jobs.append((publish_job_id, store_id))
+    try:
+        listing = check_publishable(product, data.language)
+    except PublishBlocked as exc:
+        raise HTTPException(exc.status, str(exc))
+    product.auto_publish = None      # the seller took over
+    jobs = mark_publications(product, list(dict.fromkeys(data.store_connection_ids)), data.mode)
     db.commit()
-
-    for publish_job_id, store_id in jobs:
-        await bus.publish("publish.requested", {
-            "publish_job_id": str(publish_job_id), "product_id": str(product.id), "user_id": str(user_id),
-            "store_connection_id": str(store_id), "mode": data.mode,
-            "product": {
-                "title": generic.title, "description": generic.description, "highlights": generic.highlights,
-                "price": float(product.price), "discount_pct": product.discount_pct, "stock": product.stock,
-                "sku": product.sku, "free_shipping": product.free_shipping,
-                "image_urls": [i.url for i in product.images], "tags": generic.tags, "category_id": None,
-                "category_name": generic.category_suggestion,
-                "seo_title": generic.seo_title, "meta_description": generic.meta_description,
-                "brand": (product.detected or {}).get("brand"),
-                "currency": product.currency or "PKR",
-                "attributes": (product.detected or {}).get("attributes") or {},
-                **{k: (float(getattr(product, k)) if getattr(product, k) is not None else None)
-                   for k in ("weight_kg", "length_cm", "width_cm", "height_cm")},
-            },
-        })
+    await send_publish_events(product, listing, jobs, data.mode)
     return {"publishing_to": [str(s) for _, s in jobs]}

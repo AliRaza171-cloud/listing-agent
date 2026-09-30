@@ -9,6 +9,7 @@ from sqlalchemy import func
 from lagent_common.db import mark_processed
 
 from app.core import Batch, Listing, ListingJob, Product, ProductPublication, SessionLocal, bus
+from app.publishing import PublishBlocked, check_publishable, mark_publications, send_publish_events
 
 log = logging.getLogger("lagent.catalog.handlers")
 
@@ -64,8 +65,44 @@ async def on_listing_generated(event: dict) -> None:
         product.research = data.get("research")
         product.status = "ready"
         job.status, job.finished_at = "done", datetime.utcnow()
+        auto = _take_auto_publish(product)
         db.commit()
+        if auto:
+            await _auto_publish(db, product, *auto)
         await _maybe_complete_batch(db, product)
+
+
+def _take_auto_publish(product: Product):
+    """Bulk upload's "publish when ready": used once (cleared here, in the same transaction as the listing),
+    so a redelivered event or a later re-generation never publishes again. -> (stores, mode, language) or None."""
+    auto, product.auto_publish = product.auto_publish, None
+    if not isinstance(auto, dict):
+        return None
+    try:
+        stores = list(dict.fromkeys(uuid.UUID(str(s)) for s in auto.get("store_connection_ids") or []))
+    except ValueError:
+        return None
+    mode = auto.get("mode") if auto.get("mode") in ("draft", "live") else "draft"
+    language = auto.get("language") if auto.get("language") in ("en", "ur") else "en"
+    return (stores, mode, language) if stores else None
+
+
+async def _auto_publish(db, product: Product, stores, mode: str, language: str) -> None:
+    db.refresh(product)
+    written = {l.language for l in product.listings if l.is_current}
+    if language not in written and written:
+        language = "en" if "en" in written else sorted(written)[0]   # e.g. only Urdu was written
+    try:
+        listing = check_publishable(product, language)
+    except PublishBlocked as exc:
+        # Shown on each store's row: the seller fixes it (usually the price) and presses Publish.
+        reason = "Set a price, then press Publish." if product.price is None else str(exc)
+        mark_publications(product, stores, mode, status="failed", error=reason)
+        db.commit()
+        return
+    jobs = mark_publications(product, stores, mode)
+    db.commit()
+    await send_publish_events(product, listing, jobs, mode)
 
 
 async def on_listing_failed(event: dict) -> None:
@@ -81,6 +118,7 @@ async def on_listing_failed(event: dict) -> None:
             has_listing = db.query(Listing).filter(Listing.product_id == product.id, Listing.is_current.is_(True)).first()
             product.status = "ready" if has_listing else "failed"  # a failed *re*-generation keeps the old text
             product.last_error = data["reason"]
+            product.auto_publish = None   # nothing new to publish
         db.commit()
         if product:
             await _maybe_complete_batch(db, product)

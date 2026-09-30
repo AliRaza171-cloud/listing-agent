@@ -11,7 +11,6 @@ import { myMarket,
   transcribe, updateProduct, uploadPhoto, type Store,
 } from "@/lib/api";
 import { PLATFORM_NAMES } from "@/lib/format";
-import { money } from "@/lib/markets";
 
 const MAX_ITEMS = 50;
 const MAX_PHOTOS_PER_ITEM = 8;
@@ -23,7 +22,8 @@ type Item = {
   key: string; photos: Photo[]; notes: string; selected: boolean;
   label: string;                 // the AI's name for the product ("steel water bottle")
   sorted: boolean;               // already looked at by the AI grouping (new photos aren't)
-  price: number | null; stock: number | null; discount_pct: number | null;   // from the seller's voice note
+  price: number | null; stock: number | null; discount_pct: number | null;   // typed, or from the voice note
+  priceText?: string;            // what's in the price box while typing ("19.")
 };
 type Notice = { text: string; undo?: Item[] } | null;
 
@@ -42,6 +42,8 @@ export default function BulkPage() {
   const [stores, setStores] = useState<Store[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [research, setResearch] = useState(false);
+  const [autoPublish, setAutoPublish] = useState(true);
+  const [publishMode, setPublishMode] = useState<"draft" | "live">("draft");
   const [over, setOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number; note: string } | null>(null);
@@ -105,12 +107,21 @@ export default function BulkPage() {
       .map((i) => (i.key === first.key ? { ...i, photos, notes, selected: false, sorted: true } : i)));
   }
 
+  const currency = myMarket().currency;
+  function setNum(key: string, field: "price" | "stock", raw: string) {
+    const clean = raw.replace(/[^\d.]/g, "");
+    const n = clean === "" ? null : field === "stock" ? parseInt(clean, 10) : parseFloat(clean);
+    const value = n === null || Number.isNaN(n) ? null : field === "price" && n <= 0 ? null : n;
+    setItems((all) => all.map((x) => (x.key === key
+      ? { ...x, [field]: value, ...(field === "price" ? { priceText: clean } : {}) } : x)));
+  }
+
   /** The AI got it wrong: every photo of this product becomes its own product again. */
   function split(key: string) {
     setItems((all) => all.flatMap((i) => (i.key !== key ? [i] : i.photos.map((p, n) => ({
       ...i, key: n === 0 ? i.key : uid(), photos: [p], selected: false, sorted: true,
       notes: n === 0 ? i.notes : "", label: n === 0 ? i.label : "", price: n === 0 ? i.price : null,
-      stock: n === 0 ? i.stock : null, discount_pct: n === 0 ? i.discount_pct : null,
+      stock: n === 0 ? i.stock : null, discount_pct: n === 0 ? i.discount_pct : null, priceText: n === 0 ? i.priceText : undefined,
     })))));
   }
 
@@ -189,7 +200,7 @@ export default function BulkPage() {
         const u = updates.get(i.key);
         if (!u || (!u.notes && u.price === null && u.stock === null && u.discount_pct === null)) return i;
         const notes = !u.notes ? i.notes : i.notes.trim() && !i.notes.includes(u.notes) ? `${i.notes.trim()} ${u.notes}` : (i.notes.trim() || u.notes);
-        return { ...i, notes, price: u.price ?? i.price, stock: u.stock ?? i.stock, discount_pct: u.discount_pct ?? i.discount_pct };
+        return { ...i, notes, price: u.price ?? i.price, priceText: u.price !== null ? undefined : i.priceText, stock: u.stock ?? i.stock, discount_pct: u.discount_pct ?? i.discount_pct };
       }));
       const count = snapshot.filter((i) => {
         const u = updates.get(i.key);
@@ -230,6 +241,8 @@ export default function BulkPage() {
   const languages = (["en", "ur"] as const).filter((l) => langs[l]);
   const chosenStores = useMemo(() => (stores ?? []).filter((s) => picked.includes(s.id)), [stores, picked]);
   const notEnough = credits !== null && ready.length > credits;
+  const publishing = autoPublish && chosenStores.length > 0;
+  const noPrice = ready.filter((i) => i.price === null).length;
   const canStart = !progress && !uploading && !sorting && !talkBusy && credits !== 0 && ready.length > 0 && languages.length > 0 && name.trim().length > 0;
 
   async function start() {
@@ -274,6 +287,9 @@ export default function BulkPage() {
       try {
         await generateListing(id, {
           languages, platforms, research, store_connection_ids: chosenStores.map((s) => s.id),
+          auto_publish: publishing
+            ? { store_connection_ids: chosenStores.map((s) => s.id), mode: publishMode, language: languages.includes("en") ? "en" : "ur" }
+            : null,
         });
         started++;
       } catch (e) {
@@ -371,14 +387,23 @@ export default function BulkPage() {
                     <input className="input" placeholder="What should the agent know? (brand, size…) — optional" value={it.notes}
                       aria-label={`Notes for product ${idx + 1}`}
                       onChange={(e) => setItems((all) => all.map((x) => (x.key === it.key ? { ...x, notes: e.target.value } : x)))} />
-                    {(it.price !== null || it.stock !== null || it.discount_pct !== null) && (
-                      <span className="small bulk-facts">
-                        {[it.price !== null && money(it.price, myMarket().currency), it.discount_pct !== null && `${it.discount_pct}% off`,
-                          it.stock !== null && `stock ${it.stock}`].filter(Boolean).join(" · ")}
-                        <button type="button" className="link-btn" aria-label={`Clear price and stock for product ${idx + 1}`}
-                          onClick={() => setItems((all) => all.map((x) => (x.key === it.key ? { ...x, price: null, stock: null, discount_pct: null } : x)))}>clear</button>
-                      </span>
-                    )}
+                    <div className="bulk-facts">
+                      <label className="small">{currency}
+                        <input className="input input-sm" inputMode="decimal" placeholder="Price" value={it.priceText ?? it.price ?? ""}
+                          aria-label={`Price for product ${idx + 1}`}
+                          onChange={(e) => setNum(it.key, "price", e.target.value)} />
+                      </label>
+                      <label className="small">Stock
+                        <input className="input input-sm" inputMode="numeric" placeholder="—" value={it.stock ?? ""}
+                          aria-label={`Stock for product ${idx + 1}`}
+                          onChange={(e) => setNum(it.key, "stock", e.target.value)} />
+                      </label>
+                      {it.discount_pct !== null && (
+                        <span className="small">{it.discount_pct}% off <button type="button" className="link-btn"
+                          aria-label={`Remove discount for product ${idx + 1}`}
+                          onClick={() => setItems((all) => all.map((x) => (x.key === it.key ? { ...x, discount_pct: null } : x)))}>×</button></span>
+                      )}
+                    </div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {it.photos.length > 1 && <button type="button" className="btn btn-ghost btn-sm" onClick={() => split(it.key)}
@@ -456,6 +481,40 @@ export default function BulkPage() {
             <p className="small muted">Off by default for batches — it adds an AI call per product.</p>
           </section>
 
+          <section className="card">
+            <label className="switch-row">Publish automatically
+              <input type="checkbox" role="switch" className="switch" checked={autoPublish}
+                disabled={!chosenStores.length} onChange={(e) => setAutoPublish(e.target.checked)} />
+            </label>
+            {!chosenStores.length ? (
+              <p className="small muted">Connect or tick a store above to publish the batch without opening each product.</p>
+            ) : autoPublish ? (
+              <>
+                <p className="small muted">
+                  Each product goes to {chosenStores.map((s) => s.name).join(", ")} as soon as its listing is written — you
+                  can close this page.
+                </p>
+                <div style={{ display: "flex", gap: 10 }} role="radiogroup" aria-label="Arrive in the stores as">
+                  <label className="choice"><input type="radio" name="pubmode" checked={publishMode === "draft"}
+                    onChange={() => setPublishMode("draft")} />Draft</label>
+                  <label className="choice"><input type="radio" name="pubmode" checked={publishMode === "live"}
+                    onChange={() => setPublishMode("live")} />Live</label>
+                </div>
+                <p className="small muted">{publishMode === "draft"
+                  ? "Drafts are hidden from shoppers — check them in your store, then make them live."
+                  : "Live products are visible to shoppers straight away."}</p>
+                {ready.length > 0 && noPrice > 0 && (
+                  <p className="small" style={{ color: "var(--bad)" }}>
+                    {noPrice === ready.length ? "No product has a price yet" : `${noPrice} product${noPrice === 1 ? " has" : "s have"} no price`}
+                    {" "}— {noPrice === 1 ? "it" : "they"}’ll be written but not published. Say the prices in “Tell the agent about all of them”, or set them later.
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="small muted">You’ll publish each product yourself from its page.</p>
+            )}
+          </section>
+
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {progress ? (
               <div className="card" role="status">
@@ -465,7 +524,7 @@ export default function BulkPage() {
               </div>
             ) : (
               <button type="button" className="btn btn-primary btn-lg btn-block" disabled={!canStart} onClick={start}>
-                <SparkIcon />Generate {ready.length || ""} listing{ready.length === 1 ? "" : "s"}
+                <SparkIcon />Generate {publishing ? "& publish " : ""}{ready.length || ""} listing{ready.length === 1 ? "" : "s"}
               </button>
             )}
             <span className="small" style={{ textAlign: "center", color: notEnough ? "var(--bad)" : "var(--muted)" }}>

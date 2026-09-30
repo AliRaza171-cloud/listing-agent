@@ -61,6 +61,9 @@ class Product(Base):
     width_cm = Column(Numeric(8, 1))
     height_cm = Column(Numeric(8, 1))
     last_error = Column(String)
+    # bulk upload: {"store_connection_ids": [...], "mode": "draft"|"live", "language": "en"|"ur"} — publish
+    # as soon as the listing is ready, then cleared
+    auto_publish = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

@@ -360,8 +360,10 @@ export const updateListing = (productId: string, listingId: string,
   patch: Partial<Pick<Listing, "title" | "highlights" | "description" | "tags" | "category_suggestion">>) =>
   api<Product>(`catalog/products/${productId}/listings/${listingId}`, { method: "PATCH", json: patch });
 
+export type AutoPublish = { store_connection_ids: string[]; mode: "draft" | "live"; language: "en" | "ur" };
 export const generateListing = (id: string, body: {
   languages: string[]; platforms: string[]; research: boolean; store_connection_ids: string[];
+  auto_publish?: AutoPublish | null;   // bulk only: publish as soon as the listing is written
 }) => api<{ job_id: string; status: string }>(`catalog/products/${id}/generate`, { method: "POST", json: body });
 
 export const publishProduct = (id: string, store_connection_ids: string[], mode: "draft" | "live", language: string) =>
