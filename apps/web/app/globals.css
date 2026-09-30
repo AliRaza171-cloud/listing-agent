@@ -360,7 +360,7 @@ legend { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 0; mar
 }
 @media (max-width: 900px) {
   .bulk-item { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .bulk-item .input { grid-column: 1 / -1; order: 5; }
+  .bulk-item .bulk-info { grid-column: 1 / -1; order: 5; }
   .shell { flex-direction: column; }
   .sidebar { display: none; }
   .sidebar.open { display: flex; position: fixed; inset: 0; z-index: 50; width: 100%; height: 100vh; }
@@ -399,3 +399,9 @@ legend { font-size: 14px; font-weight: 600; color: var(--ink-2); padding: 0; mar
   .l-cta { margin: 24px 16px 0; padding: 28px 22px; flex-direction: column; align-items: flex-start; }
   .l-footer { flex-direction: column; }
 }
+
+/* bulk upload: AI names + voice details */
+.bulk-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.bulk-label { font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bulk-facts { display: flex; gap: 8px; align-items: center; color: var(--ok); font-weight: 600; }
+.bulk-facts .link-btn { font-weight: 500; color: var(--muted); }

@@ -70,6 +70,7 @@ PASS_HEADERS = {"x-sfpy-signature", "x-shopify-hmac-sha256", "x-shopify-topic", 
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade", "host", "content-length"}
 
 _client = httpx.AsyncClient(timeout=30)
+SLOW = {"ai": 120, "voice": 90}
 _redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
 router = APIRouter()
 
@@ -116,7 +117,9 @@ async def proxy(service: str, path: str, request: Request):
         headers["X-User-Id"] = _user_from_token(request)
 
     upstream = await _client.request(
-        request.method, f"{base}/{path}", params=request.query_params, headers=headers, content=await request.body()
+        request.method, f"{base}/{path}", params=request.query_params, headers=headers, content=await request.body(),
+        # the AI answers some requests while the seller waits (e.g. sorting 50 bulk photos): allow it longer
+        timeout=SLOW.get(service, 30),
     )
     out_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP}
     return Response(content=upstream.content, status_code=upstream.status_code, headers=out_headers)

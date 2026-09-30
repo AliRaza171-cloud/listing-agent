@@ -342,6 +342,16 @@ export type Batch = {
 };
 export const createBatch = (name: string) => api<Batch>("catalog/batches", { method: "POST", json: { name } });
 export const listBatches = () => api<Batch[]>("catalog/batches");
+
+/** Bulk upload: the AI says which photos show the same product (photos = positions in `image_urls`). Free. */
+export const groupPhotos = (image_urls: string[]) =>
+  api<{ groups: { photos: number[]; label: string }[] }>("ai/batch/group", { method: "POST", json: { image_urls } });
+export type ProductNotes = { notes: string; price: number | null; discount_pct: number | null; stock: number | null };
+/** Bulk upload: one voice note / message about many products -> what was said about each one. Free. */
+export const splitNotes = (text: string, products: { label: string; image_url: string | null }[]) =>
+  api<{ products: ProductNotes[]; unmatched: string }>("ai/batch/notes", {
+    method: "POST", json: { text, products, market: myMarket() },
+  });
 export const updateProduct = (id: string, patch: Partial<Pick<Product,
   "seller_notes" | "price" | "discount_pct" | "stock" | "sku" | "free_shipping" | "weight_kg" | "length_cm" | "width_cm" | "height_cm">>) =>
   api<Product>(`catalog/products/${id}`, { method: "PATCH", json: patch });

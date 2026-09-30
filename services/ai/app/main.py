@@ -10,7 +10,7 @@ import asyncio
 import logging
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -108,6 +108,45 @@ async def parse_command(data: CommandIn, _user=Depends(current_user_id)):
         log.warning("command parsing fell back to rules: %s", exc)
         return asdict(await StubListingAI().parse_command(data.text, [st.model_dump() for st in data.stores],
                                                           Market.of(data.market)))
+
+
+class GroupIn(BaseModel):
+    image_urls: list[str] = Field(min_length=1, max_length=50)
+
+
+@router.post("/batch/group")
+async def group_photos(data: GroupIn, _user=Depends(current_user_id)):
+    """Bulk upload: which of these photos show the same product. Nothing is saved; the seller can
+    still combine or split. Free (no credit)."""
+    try:
+        groups = await ai.group_photos(data.image_urls)
+    except GeminiError as exc:
+        log.warning("photo grouping failed: %s", exc)
+        raise HTTPException(503, "The AI couldn't sort the photos right now — combine them yourself, or try again.")
+    return {"groups": [asdict(g) for g in groups]}
+
+
+class BatchProductRef(BaseModel):
+    label: str = Field(default="", max_length=120)
+    image_url: str | None = Field(default=None, max_length=300)
+
+
+class NotesIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    products: list[BatchProductRef] = Field(min_length=1, max_length=50)
+    market: dict | None = None
+
+
+@router.post("/batch/notes")
+async def split_notes(data: NotesIn, _user=Depends(current_user_id)):
+    """Bulk upload: one voice note / message about many products -> notes (and price, stock, discount)
+    for each. The page fills them in for the seller to check; nothing is saved here. Free (no credit)."""
+    try:
+        result = await ai.split_notes(data.text, [p.model_dump() for p in data.products], Market.of(data.market))
+    except GeminiError as exc:
+        log.warning("notes split failed: %s", exc)
+        raise HTTPException(503, "The AI couldn't match your details to the products right now — try again.")
+    return asdict(result)
 
 
 app = create_service("ai", routers=[router], bus=bus)

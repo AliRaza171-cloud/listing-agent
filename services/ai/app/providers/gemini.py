@@ -5,6 +5,8 @@ One Gemini call per step (fits the free tier's limits):
     research()       Google Search grounding when the key allows it, else model knowledge
     write_listing()  one call per language/platform, EN or natural Urdu
     parse_command()  "is ka price 2500 rakho, 10% off" -> CommandResult
+    group_photos()   bulk upload: which photos show the same product (one call for all photos)
+    split_notes()    bulk upload: one voice note about many products -> notes per product
 """
 from __future__ import annotations
 
@@ -14,9 +16,9 @@ import re
 from lagent_common.correlation import outgoing_headers
 from lagent_common.gemini import GeminiClient, GeminiError, Part
 
-from app.providers.base import (CommandResult, ListingDraft, ProductFacts, Research, ResearchSource, confirmation,
-                                match_stores)
-from app.providers.images import load_photos
+from app.providers.base import (CommandResult, ListingDraft, NotesSplit, PhotoGroup, ProductFacts, Research,
+                                ResearchSource, confirmation, match_stores, normalize_groups, normalize_notes)
+from app.providers.images import load_photos, load_thumbs
 from lagent_common.markets import Market
 
 log = logging.getLogger("lagent.ai.gemini")
@@ -337,3 +339,86 @@ class GeminiListingAI:
             parts.append("free shipping" if r.free_shipping else "no free shipping")
         r.confirmation_text = confirmation(parts, r, stores)
         return r
+
+    # ---------------------------------------------------------------- 5. bulk upload helpers
+
+    async def group_photos(self, image_urls: list[str]) -> list[PhotoGroup]:
+        thumbs = await load_thumbs(image_urls, self.catalog_url, outgoing_headers(self.internal_token))
+        usable = [t is not None for t in thumbs]
+        if sum(usable) < 2:
+            return normalize_groups([], len(thumbs), usable)
+        schema = {
+            "type": "OBJECT",
+            "properties": {"groups": {"type": "ARRAY", "items": {
+                "type": "OBJECT", "properties": {"photos": {"type": "ARRAY", "items": I}, "label": S},
+                "required": ["photos", "label"]}}},
+            "required": ["groups"],
+        }
+        prompt = (
+            f"A seller uploaded {sum(usable)} photos for a bulk listing, numbered below. Put photos of the SAME "
+            "product in one group, so each group becomes one product listing: the same item from other angles, "
+            "close-ups of it, its label, box or packaging, or it being used/worn.\n"
+            "Rules:\n"
+            "- Different products go in different groups, even if they are the same kind of thing "
+            "(two different bottles, two shirt designs). A different colour or print of an item is a different "
+            "product unless the photo shows them together as one set.\n"
+            "- A photo showing several items sold together (a set, a bundle) is one product.\n"
+            "- When unsure, keep photos apart — the seller can combine them later.\n"
+            "- Every photo number appears in exactly one group (a group may have one photo).\n"
+            "- label: a short product name buyers would use, 2-5 words (e.g. 'steel water bottle', "
+            "'black leather wallet'). Include the brand only if it is printed on the product."
+        )
+        parts = [Part.text(prompt)]
+        for i, t in enumerate(thumbs):
+            if t is not None:
+                parts += [Part.text(f"Photo {i + 1}:"), Part.blob(t, "image/jpeg")]
+        reply = await self.client.generate(parts, schema=schema, temperature=0)
+        raw = [(g.get("photos"), g.get("label")) for g in (reply.json or {}).get("groups") or []
+               if isinstance(g, dict)]
+        return normalize_groups(raw, len(thumbs), usable)
+
+    async def split_notes(self, text: str, products: list[dict], market: Market | None = None) -> NotesSplit:
+        m = market or Market()
+        count = len(products)
+        covers = await load_thumbs([str(p.get("image_url") or "") for p in products], self.catalog_url,
+                                   outgoing_headers(self.internal_token))
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+                    "product": I, "notes": S,
+                    "price": {"type": "NUMBER", "nullable": True},
+                    "discount_pct": {"type": "INTEGER", "nullable": True},
+                    "stock": {"type": "INTEGER", "nullable": True},
+                }, "required": ["product", "notes"]}},
+                "unmatched": S,
+            },
+            "required": ["items", "unmatched"],
+        }
+        prompt = (
+            f"A seller described several of the {count} products below in one message (English, Urdu or Roman "
+            "Urdu, maybe a transcribed voice note). Work out which product each part is about and split it up.\n"
+            "- A product may be named ('the bottle', 'wallet wala'), described by look ('the red one', 'kaala "
+            "wala', 'bara wala') or by position ('first', 'pehla', 'number 3', 'second last', 'aakhri'). Use the "
+            "photos and names to match.\n"
+            "- If something is said about all of them ('sab steel ke hain', 'all are imported', 'har aik ka "
+            "stock 10'), apply it to every product.\n"
+            "- notes: the facts said about that product (brand, size, material, colour, condition, what's in the "
+            "box...) as short, clear English notes. Keep names, sizes and numbers exactly as said. Never add "
+            "anything that wasn't said. Leave price, discount and stock out of notes.\n"
+            f"- price (in {m.currency}), discount_pct and stock: only when said for that product, else null. "
+            "Numbers may be words (bees=20, das=10, pachees sau=2500, dhai hazar=2500, 2.5k=2500).\n"
+            "- Only include products something was said about.\n"
+            "- unmatched: anything that can't be tied to a product, in English; '' if nothing.\n\n"
+            f"Seller's message:\n{text.strip()}\n\nProducts:"
+        )
+        parts = [Part.text(prompt)]
+        for i, (p, cover) in enumerate(zip(products, covers)):
+            label = str(p.get("label") or "").strip()[:60]
+            parts.append(Part.text(f"Product {i + 1}" + (f": {label}" if label else "")))
+            if cover is not None:
+                parts.append(Part.blob(cover, "image/jpeg"))
+        reply = await self.client.generate(parts, system=system_for(m), schema=schema, temperature=0)
+        d = reply.json or {}
+        return NotesSplit(products=normalize_notes(d.get("items") or [], count),
+                          unmatched=str(d.get("unmatched") or "").strip()[:500])

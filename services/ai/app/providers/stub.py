@@ -8,8 +8,8 @@ import re
 
 from lagent_common.markets import Market
 
-from app.providers.base import (ALL_WORDS, PLATFORM_WORDS, CommandResult, ListingDraft, ProductFacts, Research,
-                                confirmation, match_stores)
+from app.providers.base import (ALL_WORDS, PLATFORM_WORDS, CommandResult, ListingDraft, NotesSplit, ProductFacts,
+                                Research, confirmation, match_stores, normalize_groups, normalize_notes)
 
 
 class StubListingAI:
@@ -77,3 +77,22 @@ class StubListingAI:
                 result.publish_language = "ur"
         result.confirmation_text = confirmation(parts, result, stores)
         return result
+
+    async def group_photos(self, image_urls):
+        # Offline: can't see the photos, so every photo stays its own product.
+        return normalize_groups([], len(image_urls))
+
+    async def split_notes(self, text, products, market=None):
+        # Offline: sentence 1 -> product 1, sentence 2 -> product 2 ...; extra sentences are unmatched.
+        sentences = [x.strip() for x in re.split(r"[.;\n]+", text) if x.strip()]
+        raw, extra = [], []
+        for i, sentence in enumerate(sentences):
+            if i < len(products):
+                price = re.search(r"(?:price|rs\.?)\s*(\d[\d,]*)", sentence, re.I)
+                stock = re.search(r"stock\s*(\d+)", sentence, re.I)
+                raw.append({"product": i + 1, "notes": sentence,
+                            "price": price.group(1).replace(",", "") if price else None,
+                            "stock": stock.group(1) if stock else None})
+            else:
+                extra.append(sentence)
+        return NotesSplit(products=normalize_notes(raw, len(products)), unmatched=". ".join(extra))

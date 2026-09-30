@@ -8,6 +8,10 @@ Pipeline for one product:
                           ──► research()         -> Research       (optional web search)
                           ──► write_listing()    -> ListingDraft   (per language / platform)
     voice/typed command   ──► parse_command()    -> CommandResult  (price, discount, stock...)
+
+Bulk upload helpers (the seller waits for these; no credit is used):
+    many photos           ──► group_photos()     -> list[PhotoGroup]  (which photos are the same product)
+    one voice note        ──► split_notes()      -> NotesSplit        (what was said about each product)
 """
 from __future__ import annotations
 
@@ -76,6 +80,89 @@ class CommandResult:
     publish_language: str | None = None    # "en" | "ur" | None
     edit_instruction: str | None = None    # "make the title shorter" -> sent to write_listing
     confirmation_text: str = ""            # read back to the seller before anything is saved
+
+
+@dataclass
+class PhotoGroup:
+    photos: list[int]                      # 0-based positions in the photos sent
+    label: str = ""                        # short product name, e.g. "steel water bottle"
+
+
+@dataclass
+class ProductNotes:
+    notes: str = ""                        # what the seller said about this product ("" = nothing)
+    price: float | None = None             # only when the seller said it (in the seller's currency)
+    discount_pct: int | None = None
+    stock: int | None = None
+
+
+@dataclass
+class NotesSplit:
+    products: list[ProductNotes]           # one per product, in the order sent
+    unmatched: str = ""                    # what couldn't be tied to any product
+
+
+MAX_PHOTOS_PER_PRODUCT = 8
+
+
+def normalize_groups(raw: list[tuple[list, str]], count: int, usable: list[bool] | None = None,
+                     max_per: int = MAX_PHOTOS_PER_PRODUCT) -> list[PhotoGroup]:
+    """Turn the AI's answer into a clean grouping of photos 0..count-1:
+    raw = [(1-based photo numbers, label), ...]. Every photo ends up in exactly one group:
+    unknown numbers and repeats are dropped, photos the AI left out (or couldn't see) stay on their own,
+    big groups are split at max_per. Groups keep the order of their first photo."""
+    usable = usable or [True] * count
+    taken: set[int] = set()
+    groups: list[PhotoGroup] = []
+    for numbers, label in raw:
+        members = []
+        for n in numbers or []:
+            try:
+                i = int(n) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < count and usable[i] and i not in taken:
+                taken.add(i)
+                members.append(i)
+        members.sort()
+        for k in range(0, len(members), max_per):
+            groups.append(PhotoGroup(members[k:k + max_per], str(label or "").strip()[:60]))
+    groups += [PhotoGroup([i]) for i in range(count) if i not in taken]
+    groups.sort(key=lambda g: g.photos[0])
+    return groups
+
+
+def _num(v, cast, lo, hi):
+    try:
+        x = cast(v)
+    except (TypeError, ValueError):
+        return None
+    return x if lo <= x <= hi else None
+
+
+def normalize_notes(raw: list[dict], count: int, max_len: int = 1000) -> list[ProductNotes]:
+    """[{"product": 1-based number, "notes", "price", "discount_pct", "stock"}, ...] -> one ProductNotes per
+    product. Numbers outside sensible ranges are dropped; notes said twice about one product are joined."""
+    out = [ProductNotes() for _ in range(count)]
+    for d in raw or []:
+        if not isinstance(d, dict):
+            continue
+        i = _num(d.get("product"), int, 1, count)
+        if i is None:
+            continue
+        p = out[i - 1]
+        text = re.sub(r"\s+", " ", str(d.get("notes") or "")).strip()
+        if text:
+            p.notes = (f"{p.notes} {text}" if p.notes else text)[:max_len]
+        if d.get("price") is not None:
+            price = _num(d.get("price"), float, 0.01, 100_000_000)
+            p.price = price if price is not None else p.price
+        if d.get("discount_pct") is not None:
+            p.discount_pct = _num(d.get("discount_pct"), int, 1, 95) or p.discount_pct
+        if d.get("stock") is not None:
+            stock = _num(d.get("stock"), int, 0, 1_000_000)
+            p.stock = stock if stock is not None else p.stock
+    return out
 
 
 ALL_WORDS = {"all", "all stores", "every store", "everywhere", "sab", "sab stores", "sare stores", "saray stores",
@@ -162,3 +249,8 @@ class ListingAI(Protocol):
     ) -> ListingDraft: ...
 
     async def parse_command(self, text: str, stores: list[dict] | None = None, market=None) -> CommandResult: ...
+
+    async def group_photos(self, image_urls: list[str]) -> list[PhotoGroup]: ...
+
+    async def split_notes(self, text: str, products: list[dict], market=None) -> NotesSplit: ...
+    # products: [{"label": str, "image_url": str | None}] in the order shown to the seller
