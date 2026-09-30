@@ -34,7 +34,7 @@ function CreditsInner() {
   const { refreshCredits, user } = useSession();
   // Inside the Shopify admin, merchants pay through Shopify (their Shopify bill) — Shopify's rule.
   const inShopify = isEmbedded();
-  const inPakistan = !inShopify && (user.country || "PK") === "PK";   // Safepay (JazzCash, EasyPaisa) is for Pakistan
+  const inPakistan = !inShopify && (user.country || "PK") === "PK";   // Safepay (card, Google Pay, Raast) is for Pakistan
   const [data, setData] = useState<Credits | null>(null);
   const [shop, setShop] = useState<PacksInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -167,7 +167,7 @@ function CreditsInner() {
                     <button type="button" className="btn btn-primary btn-block" disabled={busy !== null}
                       onClick={() => buy(pack, "safepay")}>
                       {busy === `${pack.id}:safepay` ? <span className="spinner" /> : null}
-                      JazzCash · EasyPaisa · Card
+                      Pay in PKR · Card · Raast
                     </button>
                   )}
                   {!inShopify && providers?.stripe && other !== undefined && (
@@ -184,6 +184,9 @@ function CreditsInner() {
         </div>
         {inShopify && providers?.shopify && (
           <p className="small muted">Approve the purchase in Shopify — it’s added to your Shopify bill, in US dollars.</p>
+        )}
+        {!inShopify && providers?.safepay && inPakistan && (
+          <p className="small muted">Pay in PKR by card, Google Pay or Raast — Raast works from any bank app, JazzCash or EasyPaisa.</p>
         )}
         {!inShopify && (providers?.safepay || providers?.stripe) && (
           <p className="small muted">You’ll pay on {providers.safepay && providers.stripe ? "Safepay’s or Stripe’s" : providers.safepay ? "Safepay’s" : "Stripe’s"} secure page — we never see your card details.</p>

@@ -107,7 +107,7 @@ export default function Landing() {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <h2 className="l-h2" style={{ fontSize: 38 }}>10 free listings to start</h2>
           <p style={{ fontSize: 17, color: "var(--ink-2)" }}>
-            Then buy credit packs when you need them. Pay with JazzCash, EasyPaisa or card.
+            Then buy credit packs when you need them. Pay by card, Google Pay or Raast (from any bank, JazzCash or EasyPaisa app).
           </p>
         </div>
         <Link href="/signup" className="btn btn-primary btn-lg">Create your first listing</Link>
