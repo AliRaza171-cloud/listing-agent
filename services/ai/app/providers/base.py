@@ -35,6 +35,8 @@ class ProductFacts:
     # Details that matter for this product type but aren't knowable from the photo —
     # the UI / voice assistant asks the seller for these.
     questions_for_seller: list[str] = field(default_factory=list)
+    in_the_box: list[str] = field(default_factory=list)      # "trimmer", "4 guide combs", "USB cable"
+    use_cases: list[str] = field(default_factory=list)       # who it's for / when it's used
 
 
 @dataclass

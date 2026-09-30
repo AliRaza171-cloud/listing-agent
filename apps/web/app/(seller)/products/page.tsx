@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { PlusIcon, SearchIcon } from "@/components/Icons";
+import BatchReview from "@/components/BatchReview";
 import StatusBadge from "@/components/StatusBadge";
 import { usePolling } from "@/lib/hooks";
 import { ApiError, listBatches, listProducts, listStores, mediaUrl, type Batch, type Product, type Store } from "@/lib/api";
@@ -40,6 +41,7 @@ function Products() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("all");
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<"review" | "table">("review");
 
   async function load() {
     try {
@@ -62,7 +64,7 @@ function Products() {
   const inScope = useMemo(
     () => (products ?? []).filter((p) => !batchId || p.batch_id === batchId), [products, batchId]);
 
-  const busy = inScope.some((p) => displayStatus(p).key === "generating");
+  const busy = inScope.some((p) => displayStatus(p).key === "generating" || p.publications.some((x) => x.status === "publishing"));
   usePolling(load, busy ? 3000 : null);
 
   const counts = useMemo(() => {
@@ -119,8 +121,18 @@ function Products() {
             </>
           )}
           {batchNote && <div className="alert alert-error" style={{ whiteSpace: "pre-line" }}>{batchNote}</div>}
+          <div className="filters" role="group" aria-label="View">
+            <button type="button" className="pill" aria-pressed={view === "review"} onClick={() => setView("review")}>Review all</button>
+            <button type="button" className="pill" aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button>
+          </div>
         </section>
       )}
+
+      {batchId && view === "review" && products && (
+        <BatchReview products={inScope} stores={stores}
+          onChanged={(p) => (p ? setProducts((all) => (all ?? []).map((x) => (x.id === p.id ? p : x))) : load())} />
+      )}
+      {!(batchId && view === "review") && (<>
 
       <div className="stats">
         <div className="stat"><span>Ready to publish</span><span className="n">{products ? counts.ready : "–"}</span></div>
@@ -195,6 +207,7 @@ function Products() {
           );
         })}
       </div>
+      </>)}
       {stores.length === 0 && products && products.length > 0 && (
         <p className="small muted">
           Connect a store to publish: <Link href="/stores">{Object.values(PLATFORM_NAMES).join(", ")}</Link>.

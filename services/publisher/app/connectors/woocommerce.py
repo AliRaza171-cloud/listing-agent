@@ -16,7 +16,7 @@ import os
 
 import httpx
 
-from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory
+from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory, description_html
 
 TIMEOUT = httpx.Timeout(45.0, connect=10.0)
 
@@ -33,8 +33,7 @@ def _detail(r: httpx.Response) -> str | None:
 
 def build_description(p: ProductPayload) -> tuple[str, str]:
     """-> (description HTML, short_description HTML)."""
-    paras = [x.strip() for x in p.description.split("\n") if x.strip()]
-    long_html = "".join(f"<p>{html.escape(x)}</p>" for x in paras)
+    long_html = description_html(p.description)
     short_html = ""
     if p.highlights:
         short_html = "<ul>" + "".join(f"<li>{html.escape(h)}</li>" for h in p.highlights) + "</ul>"

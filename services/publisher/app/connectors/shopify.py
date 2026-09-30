@@ -21,7 +21,7 @@ import time
 
 import httpx
 
-from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory
+from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory, description_html
 
 log = logging.getLogger("lagent.publisher.shopify")
 TIMEOUT = httpx.Timeout(45.0, connect=10.0)
@@ -178,8 +178,7 @@ class ShopifyConnector:
         return nodes[0]["id"] if nodes else None
 
     async def _input(self, p: ProductPayload) -> dict:
-        paras = [x.strip() for x in p.description.split("\n") if x.strip()]
-        body_html = "".join(f"<p>{html.escape(x)}</p>" for x in paras)
+        body_html = description_html(p.description)
         if p.highlights:
             body_html += "<ul>" + "".join(f"<li>{html.escape(h)}</li>" for h in p.highlights) + "</ul>"
         sale = round(p.price * (1 - p.discount_pct / 100), 2) if p.discount_pct else round(p.price, 2)

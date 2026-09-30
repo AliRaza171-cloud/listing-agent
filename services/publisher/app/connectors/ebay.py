@@ -26,7 +26,7 @@ import time
 import httpx
 
 from lagent_common import ebay
-from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory
+from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory, description_html
 
 log = logging.getLogger("lagent.publisher.ebay")
 TIMEOUT = httpx.Timeout(45.0, connect=10.0)
@@ -241,7 +241,7 @@ class EbayConnector:
                                  "Add them to the product notes, write the listing again, and publish.")
         images = await self._photos(p)
 
-        desc = "".join(f"<p>{html.escape(x)}</p>" for x in p.description.split("\n") if x.strip())
+        desc = description_html(p.description)
         if p.highlights:
             desc += "<ul>" + "".join(f"<li>{html.escape(h)}</li>" for h in p.highlights[:8]) + "</ul>"
         quantity = int(p.stock) if p.stock is not None else 1

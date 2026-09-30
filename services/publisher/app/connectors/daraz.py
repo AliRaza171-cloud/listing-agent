@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from xml.sax.saxutils import escape
 
 from lagent_common import daraz
-from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory
+from app.connectors.base import ConnectorError, ProductPayload, PublishResult, StoreCategory, description_html
 
 log = logging.getLogger("lagent.publisher.daraz")
 MAX_IMAGES = 8
@@ -174,7 +174,7 @@ class DarazConnector:
         if name == "name":
             return p.title[:255]
         if name == "description":
-            body = "".join(f"<p>{html.escape(x)}</p>" for x in p.description.split("\n") if x.strip())
+            body = description_html(p.description)
             return body or html.escape(p.title)
         if name == "short_description":
             return "<ul>" + "".join(f"<li>{html.escape(h)}</li>" for h in p.highlights[:8]) + "</ul>" if p.highlights else None

@@ -6,8 +6,39 @@ Adding a platform later = one new class, registered in __init__.py.
 """
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
+
+BULLET = re.compile(r"^\s*[•\-*·]\s+")
+
+
+def description_html(text: str) -> str:
+    """Listing text -> simple HTML every store accepts: each line a <p>; runs of '• ' lines become a <ul>;
+    a short line ending in ':' ('In the box:', 'Specifications:') becomes a bold heading."""
+    out, items = [], []
+
+    def flush():
+        if items:
+            out.append("<ul>" + "".join(f"<li>{html.escape(i)}</li>" for i in items) + "</ul>")
+            items.clear()
+
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        if not line:
+            flush()
+            continue
+        if BULLET.match(line):
+            items.append(BULLET.sub("", line))
+            continue
+        flush()
+        if line.endswith(":") and len(line) <= 40:
+            out.append(f"<p><strong>{html.escape(line)}</strong></p>")
+        else:
+            out.append(f"<p>{html.escape(line)}</p>")
+    flush()
+    return "".join(out)
 
 
 @dataclass
