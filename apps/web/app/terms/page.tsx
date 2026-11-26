@@ -10,7 +10,7 @@ export default function TermsPage() {
 
       <h2>The service</h2>
       <p>
-        Listing Agent writes product listings with AI and publishes them to stores you connect. AI can make mistakes:
+        listing agent. AI can make mistakes:
         <b> check every listing before publishing it</b>. You are responsible for what you publish in your store,
         including that it is accurate and that you have the right to sell the product and use its photos.
       </p>
